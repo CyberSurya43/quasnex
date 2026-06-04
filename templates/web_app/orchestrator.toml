@@ -1,0 +1,73 @@
+[project]
+name = "new-web-application"
+workspace = "workspace"
+
+[stack]
+frontend = "To be selected by Gemini from the app brief unless already specified"
+backend = "To be selected by Codex from the app brief unless already specified"
+database = "To be selected by Codex when persistence is required"
+deployment = "Docker-first deployment handoff unless the brief specifies a platform"
+
+[agents.gemini_frontend]
+name = "Gemini"
+role = "Owns frontend UX, visual design, client-side behavior, accessibility, responsive layout, and frontend integration points. Do not make backend, deployment, or test-infrastructure decisions unless asked by a Codex stage."
+command = "gemini --prompt-file {task_file}"
+
+[agents.codex_engineering]
+name = "Codex"
+role = "Owns architecture, backend, APIs, data model, testing, integration, deployment, documentation, and release readiness. Preserve Gemini-owned frontend intent while integrating and validating the full application."
+command = "codex exec --prompt-file {task_file}"
+
+[[stages]]
+name = "00_intake_architecture"
+agent = "codex_engineering"
+title = "Intake and Architecture"
+objective = "Convert the app brief into an implementation plan, repository structure, API contract, data model, risk list, and frontend/backend boundary."
+inputs = ["brief.md", "Any files already present in workspace/"]
+outputs = ["workspace/docs/architecture.md", "workspace/docs/api-contract.md", "workspace/docs/build-plan.md"]
+acceptance = ["Frontend and backend responsibilities are explicit", "API and data contracts are detailed enough for parallel work", "Open questions are listed with reasonable defaults"]
+
+[[stages]]
+name = "10_frontend_gemini"
+agent = "gemini_frontend"
+title = "Frontend Application"
+objective = "Build the frontend experience according to the brief, architecture docs, and API contract. Produce a polished responsive web UI with realistic states and clear integration boundaries."
+inputs = ["brief.md", "workspace/docs/architecture.md", "workspace/docs/api-contract.md"]
+outputs = ["Frontend source code under workspace/", "Frontend environment notes", "Mock data or API client stubs where backend endpoints are not available yet"]
+acceptance = ["UI is responsive across mobile and desktop", "Frontend calls match the API contract", "Loading, empty, and error states are represented", "Accessibility basics are handled"]
+
+[[stages]]
+name = "20_backend_codex"
+agent = "codex_engineering"
+title = "Backend Services"
+objective = "Build backend services, persistence, authentication/authorization if required, and API endpoints that satisfy the contract."
+inputs = ["brief.md", "workspace/docs/architecture.md", "workspace/docs/api-contract.md", "Frontend integration expectations from Gemini"]
+outputs = ["Backend source code under workspace/", "Database migrations or schema docs", "Runtime configuration docs"]
+acceptance = ["Endpoints satisfy the API contract", "Validation and error handling are implemented", "Sensitive configuration uses environment variables", "Local startup is documented"]
+
+[[stages]]
+name = "30_integration_codex"
+agent = "codex_engineering"
+title = "Full Stack Integration"
+objective = "Connect frontend and backend, resolve contract drift, and make the application runnable as one project."
+inputs = ["Frontend source", "Backend source", "workspace/docs/api-contract.md"]
+outputs = ["Integrated workspace application", "Updated docs for local development"]
+acceptance = ["Single documented command path starts the app locally", "Frontend and backend agree on routes, payloads, and errors", "No temporary mock path remains active unless documented"]
+
+[[stages]]
+name = "40_testing_codex"
+agent = "codex_engineering"
+title = "Testing and Quality"
+objective = "Add focused automated tests and run quality checks for backend, frontend integration points, and critical user flows."
+inputs = ["Integrated application source", "workspace/docs/build-plan.md"]
+outputs = ["Automated tests", "Test run report in workspace/docs/test-report.md"]
+acceptance = ["Critical backend behavior has tests", "Critical frontend behavior or integration paths have tests", "Commands and results are recorded", "Known gaps are documented"]
+
+[[stages]]
+name = "50_deployment_codex"
+agent = "codex_engineering"
+title = "Deployment Package"
+objective = "Prepare the app for deployment with environment documentation, build scripts, container or platform config, and release checklist."
+inputs = ["Integrated tested application", "workspace/docs/test-report.md"]
+outputs = ["Deployment configuration", "workspace/docs/deployment.md", "workspace/docs/release-checklist.md"]
+acceptance = ["Production build path is documented", "Required environment variables are listed", "Health checks or smoke checks are defined", "Rollback or recovery notes exist"]

@@ -1,0 +1,9 @@
+[project]
+name = "ai-orchestrator"
+version = "0.1.0"
+description = "Portable AI agent orchestration framework for building web applications."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+ai-orchestrator = "ai_orchestrator.cli:main"
