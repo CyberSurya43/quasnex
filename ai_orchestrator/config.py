@@ -1,15 +1,23 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import tomllib
+
+
+@dataclass(frozen=True)
+class FallbackConfig:
+    """Ordered list of models to try for an agent. First one that succeeds wins."""
+    models: tuple[str, ...]        # e.g. ("gemini", "qwen_local")
+    commands: dict[str, str]       # model_key -> command template
 
 
 @dataclass(frozen=True)
 class AgentConfig:
     name: str
     role: str
-    command: str
+    command: str                   # primary command (kept for compatibility)
+    fallback: FallbackConfig | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -40,6 +48,7 @@ def load_config(project_dir: Path) -> ProjectConfig:
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     project = data.get("project", {})
     agents_data = data.get("agents", {})
+    fallbacks_data = data.get("fallbacks", {})
     stages_data = data.get("stages", [])
 
     if not project.get("name"):
@@ -47,14 +56,23 @@ def load_config(project_dir: Path) -> ProjectConfig:
     if not stages_data:
         raise ValueError("orchestrator.toml must define at least one [[stages]] entry")
 
-    agents = {
-        key: AgentConfig(
+    agents: dict[str, AgentConfig] = {}
+    for key, value in agents_data.items():
+        fb_key = value.get("fallback_group")
+        fallback: FallbackConfig | None = None
+        if fb_key and fb_key in fallbacks_data:
+            fb_data = fallbacks_data[fb_key]
+            fallback = FallbackConfig(
+                models=tuple(fb_data.get("models", [])),
+                commands={k: v for k, v in fb_data.get("commands", {}).items()},
+            )
+        agents[key] = AgentConfig(
             name=value.get("name", key),
             role=value.get("role", ""),
             command=value.get("command", ""),
+            fallback=fallback,
         )
-        for key, value in agents_data.items()
-    }
+
     if not agents:
         raise ValueError("orchestrator.toml must define at least one [agents.<id>] entry")
 
