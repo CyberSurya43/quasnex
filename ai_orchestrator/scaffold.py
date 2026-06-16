@@ -24,6 +24,12 @@ def init_project(target_dir: Path, name: str | None = None, force: bool = False)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination)
 
+    # Copy .env.example to .env if .env doesn't exist
+    env_example = target_dir / ".env.example"
+    env_file = target_dir / ".env"
+    if env_example.exists() and not env_file.exists():
+        shutil.copy2(env_example, env_file)
+
     if name:
         config_path = target_dir / "orchestrator.toml"
         config = config_path.read_text(encoding="utf-8")

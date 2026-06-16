@@ -6,6 +6,7 @@ from pathlib import Path
 from .runner import Orchestrator
 from .scaffold import init_project
 from . import context as ctx_store
+from .chat import start_chat
 
 
 def main() -> None:
@@ -35,7 +36,14 @@ def main() -> None:
     show_parser = ctx_sub.add_parser("show", help="Print the current shared context")
     show_parser.add_argument("project_dir", type=Path)
 
+    chat_parser = subparsers.add_parser("chat", help="Start interactive chat with AI orchestrator")
+    chat_parser.add_argument("--project-dir", type=Path, help="Project directory for context")
+
     args = parser.parse_args()
+
+    if args.command == "chat":
+        start_chat(args.project_dir)
+        return
 
     if args.command == "init":
         init_project(args.project_dir, args.name, args.force)

@@ -26,6 +26,66 @@ Run one stage:
 python -m ai_orchestrator.cli run ./my-app --stage 10_frontend_gemini
 ```
 
+## Interactive Chat Mode
+
+Chat with the orchestrator - it automatically routes your query to the appropriate agent:
+
+```bash
+# Start chat (orchestrator decides which agent to use)
+python -m ai_orchestrator.cli chat
+
+# Chat with project context
+python -m ai_orchestrator.cli chat --project-dir ./my-app
+```
+
+The orchestrator analyzes your query and routes to:
+- **Gemini** - For UI/UX, frontend, components, styling questions
+- **Codex** - For backend, API, database, testing, deployment, orchestrator questions  
+- **Ollama** - Automatic fallback when Gemini/Codex fail (credit exhaustion, API errors)
+
+Commands in chat:
+- `exit`, `quit`, `q` - Exit chat session
+- `clear` - Clear conversation history
+
+## Architecture Flow
+
+### Agent Responsibilities
+- **Codex** - Orchestrator, backend, testing, deployment
+- **Gemini** - Frontend only
+- **Ollama (Qwen)** - Fallback for both when primary fails
+
+### Automatic Fallback Chain
+1. Primary agent (Gemini/Codex) attempts task
+2. If failure (credit, timeout, API error) → Falls back to Ollama
+3. Ollama continues entire orchestration to deployment
+4. When primary API comes online, system switches back
+
+### Context Management
+All agents share context via `.orchestrator/context.json`:
+- Completed stages and model used
+- Failures and fallback history
+- User preferences
+- Agent completion notes
+
+Each agent records their work so any model can continue seamlessly.
+
+## Environment Configuration
+
+Create a `.env` file in your project root:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your API keys:
+
+```env
+GEMINI_API_KEY=your_key_here
+CODEX_API_KEY=your_key_here
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen2.5-coder
+```
+
 ## Framework Shape
 
 Each generated project contains:

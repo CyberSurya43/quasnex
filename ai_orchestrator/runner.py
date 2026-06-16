@@ -9,6 +9,7 @@ import subprocess
 
 from .config import AgentConfig, ProjectConfig, StageConfig, load_config
 from . import context as ctx_store
+from .env_loader import load_env, EnvironmentConfig
 
 
 _MAX_RETRIES_PER_MODEL = 1
@@ -18,6 +19,7 @@ class Orchestrator:
     def __init__(self, project_dir: Path) -> None:
         self.project_dir = project_dir.resolve()
         self.config = load_config(self.project_dir)
+        self.env_config = load_env(self.project_dir)
 
     # ------------------------------------------------------------------
     # Public API
@@ -89,7 +91,8 @@ class Orchestrator:
 
     def render_command(self, stage: StageConfig, task_file: Path, run_dir: Path) -> str:
         agent = self.config.agents[stage.agent]
-        return self._render(agent.command, stage, task_file, run_dir)
+        command = self._render(agent.command, stage, task_file, run_dir)
+        return self._inject_env_vars(command)
 
     # ------------------------------------------------------------------
     # Fallback execution
@@ -185,6 +188,18 @@ class Orchestrator:
             stage=stage.name,
             run_dir=str(run_dir),
         )
+
+    def _inject_env_vars(self, command: str) -> str:
+        """Inject environment variables into command string."""
+        env_vars = []
+        if self.env_config.gemini_api_key:
+            env_vars.append(f"GEMINI_API_KEY={self.env_config.gemini_api_key}")
+        if self.env_config.codex_api_key:
+            env_vars.append(f"CODEX_API_KEY={self.env_config.codex_api_key}")
+        
+        if env_vars:
+            return " ".join(env_vars) + " " + command
+        return command
 
     # ------------------------------------------------------------------
     # Internal helpers
