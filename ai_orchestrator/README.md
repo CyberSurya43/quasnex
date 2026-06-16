@@ -3,11 +3,14 @@
 Portable orchestration framework for building web applications with Gemini owning frontend work and Codex owning architecture, backend, testing, deployment, and release readiness.
 
 ## Quick Start
+- Copy and paste the `ai_orchestrator` folder to your project folder.
+- Move the `setup.py` and `pyproject.toml` to parent directory of you project and run the commands.
 
 ```bash
-python -m ai_orchestrator.cli init ./my-app --name my-app
-python -m ai_orchestrator.cli plan ./my-app
-python -m ai_orchestrator.cli run ./my-app
+pip install -e .
+ai-orchestrator init ./my-app --name my-app
+ai-orchestrator plan ./my-app
+ai-orchestrator run ./my-app
 ```
 
 Use `python3` instead of `python` on systems where only `python3` is installed.
@@ -17,13 +20,13 @@ Use `python3` instead of `python` on systems where only `python3` is installed.
 To execute the configured agent commands:
 
 ```bash
-python -m ai_orchestrator.cli run ./my-app --execute
+ai-orchestrator run ./my-app --execute
 ```
 
 Run one stage:
 
 ```bash
-python -m ai_orchestrator.cli run ./my-app --stage 10_frontend_gemini
+ai-orchestrator run ./my-app --stage 10_frontend_gemini
 ```
 
 ## Interactive Chat Mode
