@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-orchestrator"
+version = "0.1.0"
+description = "Portable AI agent orchestration framework for building web applications."
+requires-python = ">=3.11"
+dependencies = []
+readme = "README.md"
+license = {text = "MIT"}
+
+[project.scripts]
+ai-orchestrator = "ai_orchestrator.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["ai_orchestrator"]
+
+[tool.setuptools.package-data]
+ai_orchestrator = [
+    "templates/**/*",
+    "examples/**/*",
+    "*.md",
+]

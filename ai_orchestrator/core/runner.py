@@ -7,9 +7,9 @@ import json
 import shlex
 import subprocess
 
-from .config import AgentConfig, ProjectConfig, StageConfig, load_config
+from ..config import AgentConfig, ProjectConfig, StageConfig, load_config, load_env, EnvironmentConfig
 from . import context as ctx_store
-from .env_loader import load_env, EnvironmentConfig
+from ..tools.senior_dev import get_agent_instructions, get_rules_for_stage, DevelopmentTools
 
 
 _MAX_RETRIES_PER_MODEL = 1
@@ -55,8 +55,12 @@ class Orchestrator:
     def write_task(self, run_dir: Path, stage: StageConfig) -> Path:
         agent = self.config.agents[stage.agent]
         task_file = run_dir / "tasks" / f"{stage.name}.md"
+        
+        # Build task content with professional guidelines
         content = self._task_markdown(stage, agent.role)
+        content += "\n" + self._add_professional_guidelines(stage, agent)
         content += ctx_store.inject_context_block(self.project_dir)
+        
         task_file.write_text(content, encoding="utf-8")
         return task_file
 
@@ -200,6 +204,47 @@ class Orchestrator:
         if env_vars:
             return " ".join(env_vars) + " " + command
         return command
+    
+    def _add_professional_guidelines(self, stage: StageConfig, agent: AgentConfig) -> str:
+        """Add professional development guidelines to task."""
+        lines = [
+            "",
+            "---",
+            "## Professional Development Guidelines",
+            "",
+        ]
+        
+        # Add stage-specific rules
+        stage_rules = get_rules_for_stage(stage.name)
+        lines.append(stage_rules)
+        lines.append("")
+        
+        # Add relevant checklists
+        if "test" in stage.name.lower():
+            lines.append("### Testing Checklist")
+            for item in DevelopmentTools.get_testing_checklist():
+                lines.append(f"- [ ] {item}")
+            lines.append("")
+        
+        if "deploy" in stage.name.lower():
+            lines.append("### Deployment Checklist")
+            for item in DevelopmentTools.get_deployment_checklist():
+                lines.append(f"- [ ] {item}")
+            lines.append("")
+        
+        # Always add security checklist
+        lines.append("### Security Checklist")
+        for item in DevelopmentTools.get_security_checklist():
+            lines.append(f"- [ ] {item}")
+        lines.append("")
+        
+        # Add code review checklist
+        lines.append("### Code Review Checklist")
+        for item in DevelopmentTools.get_code_review_checklist():
+            lines.append(f"- [ ] {item}")
+        lines.append("")
+        
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Internal helpers

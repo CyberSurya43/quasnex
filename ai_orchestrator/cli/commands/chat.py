@@ -1,11 +1,12 @@
+"""Chat command - Start interactive chat session."""
+
 from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Iterator
 
-from .env_loader import load_env
-from .orchestrator_chat import ChatOrchestrator
+from ai_orchestrator.config import load_env
+from ai_orchestrator.core import ChatOrchestrator
 
 
 class ChatSession:
@@ -56,7 +57,7 @@ class ChatSession:
                 break
 
 
-def start_chat(project_dir: Path | None = None) -> None:
-    """Start interactive chat session with orchestrator."""
+def handle_chat(project_dir: Path | None = None) -> None:
+    """Handle the chat command - Start interactive chat session."""
     session = ChatSession(project_dir)
     session.run()

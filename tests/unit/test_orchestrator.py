@@ -3,9 +3,9 @@ import json
 import tempfile
 import unittest
 
-from ai_orchestrator.runner import Orchestrator
-from ai_orchestrator.scaffold import init_project
-from ai_orchestrator import context as ctx_store
+from ai_orchestrator.core import Orchestrator
+from ai_orchestrator.scaffolding import init_project
+from ai_orchestrator.core import context as ctx_store
 
 
 class OrchestratorTests(unittest.TestCase):
@@ -33,7 +33,8 @@ class OrchestratorTests(unittest.TestCase):
 
             command = orchestrator.render_command(stage, task_file, run_dir)
 
-            self.assertTrue(command.startswith("gemini --prompt-file "))
+            # Check that the command contains the expected parts (may have env vars prepended)
+            self.assertIn("gemini --prompt-file ", command)
             self.assertIn(str(task_file), command)
 
     def test_fallback_group_loaded_for_frontend_agent(self) -> None:

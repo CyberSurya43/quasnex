@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .agents import create_agent, AIAgent
-from .env_loader import load_env
-from .config import load_config
+from ..agents import create_agent, AIAgent
+from ..config import load_env, load_config
 from . import context as ctx_store
+from ..tools.senior_dev import get_agent_instructions
 
 
 class ChatOrchestrator:
@@ -125,14 +125,27 @@ class ChatOrchestrator:
         return "codex" if "codex" in self._agents else "ollama"
     
     def _add_project_context(self, query: str) -> str:
-        """Add project context from context.py to the query."""
+        """Add project context and professional guidelines to the query."""
         if not self.project_dir:
             return query
         
+        # Determine agent type for instructions
+        agent_type = self._determine_agent(query)
+        
+        # Build enhanced query with guidelines
+        enhanced_parts = [query]
+        
+        # Add professional guidelines
+        instructions = get_agent_instructions(agent_type)
+        enhanced_parts.append("\n## Professional Guidelines")
+        enhanced_parts.append(instructions)
+        
+        # Add project context
         context_block = ctx_store.inject_context_block(self.project_dir)
         if context_block:
-            return f"{query}\n\n{context_block}"
-        return query
+            enhanced_parts.append(context_block)
+        
+        return "\n".join(enhanced_parts)
     
     def _is_failure_response(self, response: str) -> bool:
         """Check if response indicates a failure."""

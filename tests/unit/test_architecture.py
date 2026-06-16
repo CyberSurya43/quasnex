@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """Test script to verify orchestrator fallback architecture."""
 
-from pathlib import Path
-import sys
-
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from ai_orchestrator.orchestrator_chat import ChatOrchestrator
+from ai_orchestrator.core import ChatOrchestrator
 
 
 def test_agent_routing():

@@ -1,0 +1,10 @@
+include README.md
+include QUICKSTART.md
+include ARCHITECTURE.md
+include SENIOR_DEV_GUIDELINES.md
+include PROFESSIONAL_TOOLS_SUMMARY.md
+include .env.example
+include .gitignore
+recursive-include templates *
+recursive-include examples *
+recursive-include tests *.py
