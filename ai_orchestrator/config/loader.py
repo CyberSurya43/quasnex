@@ -14,11 +14,14 @@ import tomllib
 
 @dataclass
 class EnvironmentConfig:
-    """Configuration loaded from .env file for API keys and Ollama settings."""
-    gemini_api_key: str | None = None
-    codex_api_key: str | None = None
-    ollama_base_url: str = "http://localhost:11434"
+    """Configuration loaded from .env file for CLI agent settings.
+
+    API keys are NOT managed here — each CLI tool (codex, claude, ollama)
+    handles its own authentication.
+    """
     ollama_model: str = "qwen2.5-coder"
+    codex_approval_mode: str = "full-auto"
+    claude_model: str | None = None
 
 
 def load_env(project_dir: Path) -> EnvironmentConfig:
@@ -38,10 +41,9 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
             env_vars[key.strip()] = value.strip()
     
     return EnvironmentConfig(
-        gemini_api_key=env_vars.get("GEMINI_API_KEY"),
-        codex_api_key=env_vars.get("CODEX_API_KEY"),
-        ollama_base_url=env_vars.get("OLLAMA_BASE_URL", "http://localhost:11434"),
         ollama_model=env_vars.get("OLLAMA_MODEL", "qwen2.5-coder"),
+        codex_approval_mode=env_vars.get("CODEX_APPROVAL_MODE", "full-auto"),
+        claude_model=env_vars.get("CLAUDE_MODEL") or None,
     )
 
 

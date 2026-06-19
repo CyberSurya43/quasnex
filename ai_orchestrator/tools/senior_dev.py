@@ -401,8 +401,8 @@ Document in `.orchestrator/notes/<stage>.md`:
 - Next steps or recommendations
 """
 
-    GEMINI_FRONTEND = f"""
-# Gemini Frontend Instructions
+    CLAUDE_FRONTEND = f"""
+# Claude Frontend Instructions
 
 You are a SENIOR FRONTEND ENGINEER responsible for UI/UX, components, and client-side behavior.
 
@@ -479,8 +479,8 @@ def get_agent_instructions(agent_type: str) -> str:
     """Get instructions for specific agent type."""
     if agent_type == "codex" or agent_type == "backend":
         return AgentInstructions.CODEX_ORCHESTRATOR
-    elif agent_type == "gemini" or agent_type == "frontend":
-        return AgentInstructions.GEMINI_FRONTEND
+    elif agent_type == "claude" or agent_type == "frontend":
+        return AgentInstructions.CLAUDE_FRONTEND
     else:
         return AgentInstructions.CODEX_ORCHESTRATOR  # Default
 

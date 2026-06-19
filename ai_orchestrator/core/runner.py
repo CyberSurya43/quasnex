@@ -83,9 +83,10 @@ class Orchestrator:
                 "",
                 "- Each agent reads its stage task file before making changes.",
                 "- Each agent writes completed work notes into `.orchestrator/notes/<stage>.md`.",
-                "- Frontend (UI/UX) is owned by Gemini. Fallback: Qwen local model.",
-                "- Backend, testing, deployment, and release are owned by Codex. Fallback: Qwen local model.",
-                "- If a primary model fails (credit exhaustion, timeout, API error), the fallback model",
+                "- Frontend (UI/UX) is owned by Claude Code. Fallback: Ollama local model.",
+                "- Backend, testing, deployment, and release are owned by Codex. Fallback: Ollama local model.",
+                "- All agents use CLI tools (codex, claude, ollama) — no API keys managed by the orchestrator.",
+                "- If a primary CLI tool fails (timeout, crash, rate limit), the fallback model",
                 "  resumes from the same task file without human intervention.",
                 "- Shared context is maintained in `.orchestrator/context.json` across all models.",
             ]
@@ -194,15 +195,12 @@ class Orchestrator:
         )
 
     def _inject_env_vars(self, command: str) -> str:
-        """Inject environment variables into command string."""
-        env_vars = []
-        if self.env_config.gemini_api_key:
-            env_vars.append(f"GEMINI_API_KEY={self.env_config.gemini_api_key}")
-        if self.env_config.codex_api_key:
-            env_vars.append(f"CODEX_API_KEY={self.env_config.codex_api_key}")
-        
-        if env_vars:
-            return " ".join(env_vars) + " " + command
+        """Inject environment variables into command string.
+
+        API keys are no longer injected — each CLI tool manages its own
+        authentication.  This method is kept for forward-compatibility
+        with any future env vars that need to be passed.
+        """
         return command
     
     def _add_professional_guidelines(self, stage: StageConfig, agent: AgentConfig) -> str:

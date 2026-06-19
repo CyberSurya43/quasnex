@@ -10,7 +10,11 @@ from ..tools.senior_dev import get_agent_instructions
 
 
 class ChatOrchestrator:
-    """Orchestrator that routes user queries to appropriate AI agents with fallback."""
+    """Orchestrator that routes user queries to appropriate AI agents with fallback.
+
+    All agents use CLI tools (codex, claude, ollama) via subprocess.
+    No API keys are managed by the orchestrator — each CLI handles its own auth.
+    """
     
     def __init__(self, project_dir: Path | None = None):
         self.project_dir = project_dir or Path.cwd()
@@ -26,33 +30,33 @@ class ChatOrchestrator:
         self._init_agents()
     
     def _init_agents(self) -> None:
-        """Initialize all available agents."""
-        # Ollama is always available as fallback
-        self._agents["ollama"] = create_agent(
-            "ollama", 
-            model=self.env_config.ollama_model
-        )
+        """Initialize all available agents.
+
+        Each agent checks whether its CLI tool is installed. Only agents
+        whose CLI is available are added to the active agent pool.
+        Ollama is always attempted as the local fallback.
+        """
+        # Ollama — local fallback, always attempted
+        ollama = create_agent("ollama", model=self.env_config.ollama_model)
+        if ollama.check_available()[0]:
+            self._agents["ollama"] = ollama
         
-        # Gemini if API key available
-        if self.env_config.gemini_api_key:
-            self._agents["gemini"] = create_agent(
-                "gemini", 
-                api_key=self.env_config.gemini_api_key
-            )
+        # Codex CLI — backend, testing, deployment, orchestration
+        codex = create_agent("codex", approval_mode=self.env_config.codex_approval_mode)
+        if codex.check_available()[0]:
+            self._agents["codex"] = codex
         
-        # Codex if API key available
-        if self.env_config.codex_api_key:
-            self._agents["codex"] = create_agent(
-                "codex", 
-                api_key=self.env_config.codex_api_key
-            )
+        # Claude Code CLI — frontend, UI/UX, design
+        claude = create_agent("claude", model=self.env_config.claude_model)
+        if claude.check_available()[0]:
+            self._agents["claude"] = claude
     
     def route_query(self, query: str, context: list[dict[str, str]] | None = None) -> tuple[str, str]:
         """
         Route user query to the appropriate agent with automatic fallback.
         Flow:
         - orchestrator, backend, testing, deploy -> Codex (fallback: Ollama)
-        - frontend -> Gemini (fallback: Ollama)
+        - frontend -> Claude (fallback: Ollama)
         
         Returns: (agent_name, response)
         """
@@ -76,7 +80,7 @@ class ChatOrchestrator:
                 
                 # Check if response indicates failure
                 if self._is_failure_response(response):
-                    reason = "API error or credit exhaustion"
+                    reason = "CLI tool error or timeout"
                     self._record_failure(agent_name, query, reason)
                     print(f"  [fallback] {agent_name} failed: {reason}. Trying next agent...")
                     continue
@@ -92,13 +96,13 @@ class ChatOrchestrator:
                 continue
         
         # All agents failed
-        return "none", "Error: All agents failed to respond. Please check your configuration."
+        return "none", "Error: All agents failed to respond. Please check that codex, claude, or ollama CLI tools are installed."
     
     def _determine_agent(self, query: str) -> str:
         """Determine which agent should handle the query based on content."""
         query_lower = query.lower()
         
-        # Frontend-related keywords -> Gemini
+        # Frontend-related keywords -> Claude
         frontend_keywords = [
             "ui", "ux", "frontend", "react", "vue", "angular", "css", "html",
             "component", "layout", "design", "responsive", "accessibility",
@@ -113,15 +117,15 @@ class ChatOrchestrator:
             "release", "build", "ci", "cd", "pipeline"
         ]
         
-        # Check for frontend keywords -> Gemini
+        # Check for frontend keywords -> Claude
         if any(keyword in query_lower for keyword in frontend_keywords):
-            return "gemini" if "gemini" in self._agents else "ollama"
+            return "claude" if "claude" in self._agents else "ollama"
         
         # Check for backend/orchestrator/testing/deploy keywords -> Codex
         if any(keyword in query_lower for keyword in codex_keywords):
             return "codex" if "codex" in self._agents else "ollama"
         
-        # Default: orchestrator/general queries go to Codex (or ollama fallback)
+        # Default: general queries go to Codex (or ollama fallback)
         return "codex" if "codex" in self._agents else "ollama"
     
     def _add_project_context(self, query: str) -> str:

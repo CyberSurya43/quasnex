@@ -21,6 +21,9 @@ setup(
     author="AI Orchestrator Team",
     python_requires=">=3.11",
     packages=find_packages(),
+        install_requires=[
+        "requests>=2.31.0",
+    ],
     include_package_data=True,
     package_data={
         "ai_orchestrator": [
