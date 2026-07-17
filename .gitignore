@@ -1,5 +1,17 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
-.orchestrator/runs/
+.mypy_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
 .env
+
+# Generated per-project orchestrator state (not the templates that ship it)
+.orchestrator/runs/
+.orchestrator/notes/*.md
+.orchestrator/context.json
+.orchestrator/chat_state.sqlite
+.orchestrator/knowledge_graph.json

@@ -4,22 +4,44 @@ from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 import json
-import shlex
-import subprocess
 
-from ..config import AgentConfig, ProjectConfig, StageConfig, load_config, load_env, EnvironmentConfig
+from ..config import AgentConfig, StageConfig, load_config
+from .. import knowledge_graph as kg
 from . import context as ctx_store
-from ..tools.senior_dev import get_agent_instructions, get_rules_for_stage, DevelopmentTools
+from .agent_graph import CodingAgent
+from ..llm import ModelRegistry
+from ..skills import load_skill
+from ..tools.senior_dev import get_rules_for_stage, DevelopmentTools
+
+_STAGE_SKILL_KEYWORDS = (
+    ("deploy", "deploy"),
+    ("test", "test"),
+    ("intake", "plan"),
+    ("architecture", "plan"),
+)
 
 
-_MAX_RETRIES_PER_MODEL = 1
+def _matching_skill(stage_name: str) -> str | None:
+    lowered = stage_name.lower()
+    for keyword, skill_name in _STAGE_SKILL_KEYWORDS:
+        if keyword in lowered:
+            return skill_name
+    return "build"  # frontend/backend/integration stages all write code
 
 
 class Orchestrator:
+    """Plans and runs the multi-stage build pipeline defined in orchestrator.toml.
+
+    Each stage is executed by the same tool-using LangGraph agent (see
+    ``core.agent_graph.CodingAgent``), adopting the stage's configured persona
+    and reading/writing real files in the project workspace. If the active
+    model provider fails, it falls back to the other configured provider.
+    """
+
     def __init__(self, project_dir: Path) -> None:
         self.project_dir = project_dir.resolve()
         self.config = load_config(self.project_dir)
-        self.env_config = load_env(self.project_dir)
+        self.registry = ModelRegistry(self.project_dir)
 
     # ------------------------------------------------------------------
     # Public API
@@ -35,6 +57,7 @@ class Orchestrator:
 
     def plan(self, run_dir: Path | None = None) -> Path:
         run_dir = run_dir or self.create_run()
+        kg.build_or_update(self.config.workspace, self.project_dir)
         for stage in self.config.stages:
             self.write_task(run_dir, stage)
         self.write_handoff(run_dir)
@@ -47,7 +70,7 @@ class Orchestrator:
         results = []
         for stage in stages:
             task_file = self.write_task(run_dir, stage)
-            result = self._run_stage(stage, task_file, run_dir, execute)
+            result = self._run_stage(stage, task_file, execute)
             results.append(result)
         self._write_state(run_dir, "executed" if execute else "dry_run", results)
         return results
@@ -55,12 +78,14 @@ class Orchestrator:
     def write_task(self, run_dir: Path, stage: StageConfig) -> Path:
         agent = self.config.agents[stage.agent]
         task_file = run_dir / "tasks" / f"{stage.name}.md"
-        
-        # Build task content with professional guidelines
+
         content = self._task_markdown(stage, agent.role)
-        content += "\n" + self._add_professional_guidelines(stage, agent)
+        content += "\n" + self._add_professional_guidelines(stage)
+        skill_name = _matching_skill(stage.name)
+        if skill_name:
+            content += f"\n---\n## Skill: {skill_name}\n\n{load_skill(skill_name)}\n"
         content += ctx_store.inject_context_block(self.project_dir)
-        
+
         task_file.write_text(content, encoding="utf-8")
         return task_file
 
@@ -81,33 +106,28 @@ class Orchestrator:
                 "",
                 "## Operating Rules",
                 "",
-                "- Each agent reads its stage task file before making changes.",
-                "- Each agent writes completed work notes into `.orchestrator/notes/<stage>.md`.",
-                "- Frontend (UI/UX) is owned by Claude Code. Fallback: Ollama local model.",
-                "- Backend, testing, deployment, and release are owned by Codex. Fallback: Ollama local model.",
-                "- All agents use CLI tools (codex, claude, ollama) — no API keys managed by the orchestrator.",
-                "- If a primary CLI tool fails (timeout, crash, rate limit), the fallback model",
-                "  resumes from the same task file without human intervention.",
-                "- Shared context is maintained in `.orchestrator/context.json` across all models.",
+                "- Each stage is executed by the same tool-using coding agent, adopting the",
+                "  stage's persona (see [agents.<id>].role in orchestrator.toml).",
+                "- The agent reads its stage task file, then uses its filesystem/shell tools",
+                "  to do the work directly in the workspace.",
+                "- File writes and shell commands require interactive confirmation.",
+                "- Each stage writes completion notes into `.orchestrator/notes/<stage>.md`.",
+                "- If the active model provider errors out, the run falls back to the other",
+                "  configured provider (lightning <-> nvidia) and resumes from the same task file.",
+                "- Shared context is maintained in `.orchestrator/context.json`.",
             ]
         )
         handoff.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return handoff
 
-    def render_command(self, stage: StageConfig, task_file: Path, run_dir: Path) -> str:
-        agent = self.config.agents[stage.agent]
-        command = self._render(agent.command, stage, task_file, run_dir)
-        return self._inject_env_vars(command)
-
     # ------------------------------------------------------------------
-    # Fallback execution
+    # Stage execution
     # ------------------------------------------------------------------
 
     def _run_stage(
         self,
         stage: StageConfig,
         task_file: Path,
-        run_dir: Path,
         execute: bool,
     ) -> dict[str, object]:
         agent = self.config.agents[stage.agent]
@@ -116,132 +136,83 @@ class Orchestrator:
             "agent": stage.agent,
             "task_file": str(task_file),
             "executed": execute,
-            "returncode": None,
-            "model_used": None,
+            "provider_used": None,
+            "success": None,
         }
 
         if not execute:
-            command = self.render_command(stage, task_file, run_dir)
-            result["command"] = command
             return result
 
-        # Build ordered list: primary model first, then fallbacks
-        model_commands = self._model_command_sequence(agent, stage, task_file, run_dir)
+        provider_order = self._provider_order(agent)
+        task_prompt = task_file.read_text(encoding="utf-8")
 
-        for model_key, command in model_commands:
-            result["command"] = command
-            returncode = self._execute(command)
-            if returncode == 0:
-                result["returncode"] = returncode
-                result["model_used"] = model_key
-                ctx_store.record_stage_complete(self.project_dir, stage.name, stage.agent, model_key)
+        for provider_name in provider_order:
+            try:
+                self.registry.switch(provider_name)
+                coding_agent = CodingAgent(
+                    self.registry,
+                    workspace_root=self.config.workspace,
+                    project_dir=self.project_dir,
+                    persona=agent.role,
+                )
+                coding_agent.send(task_prompt)
+                result["provider_used"] = provider_name
+                result["success"] = True
+                ctx_store.record_stage_complete(
+                    self.project_dir, stage.name, stage.agent, provider_name
+                )
                 return result
-            else:
-                reason = f"exit code {returncode}"
+            except Exception as exc:
+                reason = str(exc)
                 print(
-                    f"  [fallback] {model_key} failed for stage {stage.name!r} ({reason})."
-                    f" Trying next model..."
+                    f"  [fallback] provider {provider_name!r} failed for stage {stage.name!r} "
+                    f"({reason}). Trying next provider..."
                 )
                 ctx_store.record_stage_failure(
-                    self.project_dir, stage.name, stage.agent, model_key, reason
+                    self.project_dir, stage.name, stage.agent, provider_name, reason
                 )
 
-        # All models exhausted
-        result["returncode"] = -1
-        result["model_used"] = "none"
-        print(f"  [ERROR] All models failed for stage {stage.name!r}. Manual intervention required.")
+        result["success"] = False
+        result["provider_used"] = "none"
+        print(f"  [ERROR] All providers failed for stage {stage.name!r}. Manual intervention required.")
         return result
 
-    def _model_command_sequence(
-        self,
-        agent: AgentConfig,
-        stage: StageConfig,
-        task_file: Path,
-        run_dir: Path,
-    ) -> list[tuple[str, str]]:
-        """Return [(model_key, rendered_command), ...] in priority order."""
-        sequence: list[tuple[str, str]] = []
+    def _provider_order(self, agent: AgentConfig) -> list[str]:
+        """Preferred provider first (if configured/available), then the rest."""
+        available = list(self.registry.env_config.providers)
+        if agent.provider and agent.provider in available:
+            return [agent.provider] + [p for p in available if p != agent.provider]
+        return available
 
-        # Primary command
-        if agent.command:
-            sequence.append(("primary", self._render(agent.command, stage, task_file, run_dir)))
+    def _add_professional_guidelines(self, stage: StageConfig) -> str:
+        lines = ["", "---", "## Professional Development Guidelines", ""]
 
-        # Fallback models
-        if agent.fallback:
-            for model_key in agent.fallback.models:
-                cmd_template = agent.fallback.commands.get(model_key, "")
-                if cmd_template:
-                    sequence.append(
-                        (model_key, self._render(cmd_template, stage, task_file, run_dir))
-                    )
-
-        return sequence
-
-    def _execute(self, command: str) -> int:
-        completed = subprocess.run(
-            shlex.split(command),
-            cwd=self.config.workspace,
-            check=False,
-            text=True,
-        )
-        return completed.returncode
-
-    def _render(self, template: str, stage: StageConfig, task_file: Path, run_dir: Path) -> str:
-        return template.format(
-            task_file=str(task_file),
-            workspace=str(self.config.workspace),
-            stage=stage.name,
-            run_dir=str(run_dir),
-        )
-
-    def _inject_env_vars(self, command: str) -> str:
-        """Inject environment variables into command string.
-
-        API keys are no longer injected — each CLI tool manages its own
-        authentication.  This method is kept for forward-compatibility
-        with any future env vars that need to be passed.
-        """
-        return command
-    
-    def _add_professional_guidelines(self, stage: StageConfig, agent: AgentConfig) -> str:
-        """Add professional development guidelines to task."""
-        lines = [
-            "",
-            "---",
-            "## Professional Development Guidelines",
-            "",
-        ]
-        
-        # Add stage-specific rules
         stage_rules = get_rules_for_stage(stage.name)
         lines.append(stage_rules)
         lines.append("")
-        
-        # Add relevant checklists
+
         if "test" in stage.name.lower():
             lines.append("### Testing Checklist")
             for item in DevelopmentTools.get_testing_checklist():
                 lines.append(f"- [ ] {item}")
             lines.append("")
-        
+
         if "deploy" in stage.name.lower():
             lines.append("### Deployment Checklist")
             for item in DevelopmentTools.get_deployment_checklist():
                 lines.append(f"- [ ] {item}")
             lines.append("")
-        
-        # Always add security checklist
+
         lines.append("### Security Checklist")
         for item in DevelopmentTools.get_security_checklist():
             lines.append(f"- [ ] {item}")
         lines.append("")
-        
-        # Add code review checklist
+
         lines.append("### Code Review Checklist")
         for item in DevelopmentTools.get_code_review_checklist():
             lines.append(f"- [ ] {item}")
         lines.append("")
-        
+
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

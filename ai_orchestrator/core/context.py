@@ -1,7 +1,8 @@
 """Shared context store — persisted as .orchestrator/context.json.
 
-All agents read and write through this so every model (Gemini, Codex, Qwen)
-shares the same project state, user preferences, and progress history.
+Every stage/session reads and writes through this so every model provider
+(lightning, nvidia, ...) shares the same project state, user preferences, and
+progress history.
 """
 from __future__ import annotations
 

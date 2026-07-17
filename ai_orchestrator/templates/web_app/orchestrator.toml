@@ -5,13 +5,16 @@
 #   gemini_frontend  → UI/UX, responsive layout, accessibility, client-side behavior
 #   codex_engineering → architecture, backend, APIs, testing, deployment, release
 #
+# Every stage is executed by the same tool-using LangGraph coding agent — the
+# [agents.<id>] block below only supplies its persona (system-prompt role) and,
+# optionally, a preferred model `provider` ("lightning" or "nvidia", see .env).
+#
 # Fallback policy:
-#   If the primary model fails (API error, credit exhaustion, timeout, non-zero exit),
-#   the orchestrator automatically retries using the next model in the fallback group.
-#   Qwen (local) is always the final fallback so work NEVER stalls.
+#   If the preferred (or active) provider errors out, the orchestrator retries
+#   the stage with the next configured provider, so work never stalls.
 #
 # Shared context:
-#   .orchestrator/context.json is read and written by all models.
+#   .orchestrator/context.json is read and written across every stage/session.
 #   Every task file has the shared context block appended automatically.
 # ============================================================
 
@@ -20,45 +23,22 @@ name = "new-web-application"
 workspace = "workspace"
 
 [stack]
-frontend = "To be selected by Gemini from the app brief unless already specified"
-backend  = "To be selected by Codex from the app brief unless already specified"
-database = "To be selected by Codex when persistence is required"
+frontend = "To be selected by the agent from the app brief unless already specified"
+backend  = "To be selected by the agent from the app brief unless already specified"
+database = "To be selected by the agent when persistence is required"
 deployment = "Docker-first deployment handoff unless the brief specifies a platform"
-
-# ============================================================
-# Fallback Groups
-# ============================================================
-# Each group lists models in priority order.
-# commands.<model_key> is the CLI template for that model.
-# Placeholders: {task_file}  {workspace}  {stage}  {run_dir}
-# ============================================================
-
-[fallbacks.frontend_models]
-models = ["gemini", "qwen_local"]
-
-[fallbacks.frontend_models.commands]
-gemini     = "gemini --prompt-file {task_file}"
-qwen_local = "ollama run qwen2.5-coder --prompt-file {task_file}"
-
-[fallbacks.engineering_models]
-models = ["codex", "qwen_local"]
-
-[fallbacks.engineering_models.commands]
-codex      = "codex exec --prompt-file {task_file}"
-qwen_local = "ollama run qwen2.5-coder --prompt-file {task_file}"
 
 # ============================================================
 # Agents
 # ============================================================
 
 [agents.gemini_frontend]
-name           = "Gemini"
-fallback_group = "frontend_models"
-command        = "gemini --prompt-file {task_file}"
-role           = """\
+name     = "Frontend Engineer"
+provider = "nvidia"
+role     = """\
 STRICT FRONTEND AGENT RULES
 ============================
-You are Gemini, the exclusive owner of all frontend work.
+You are the Frontend Engineer, the exclusive owner of all frontend work.
 
 RESPONSIBILITIES (you MUST do these):
 - Build the complete UI/UX from the brief and architecture docs.
@@ -73,7 +53,7 @@ STRICT BOUNDARIES (you MUST NOT do these):
 - Do not modify backend source, database schemas, or migrations.
 - Do not change test infrastructure, CI/CD configs, or Dockerfiles.
 - Do not make deployment or release decisions.
-- Do not override Codex's API contract — if the contract is wrong, flag it in your notes.
+- Do not override the Engineering Lead's API contract — if the contract is wrong, flag it in your notes.
 
 HANDOFF:
 - Write a completion note to .orchestrator/notes/<stage>.md listing:
@@ -82,26 +62,25 @@ HANDOFF:
 """
 
 [agents.codex_engineering]
-name           = "Codex"
-fallback_group = "engineering_models"
-command        = "codex exec --prompt-file {task_file}"
-role           = """\
+name     = "Engineering Lead"
+provider = "lightning"
+role     = """\
 STRICT ENGINEERING AGENT RULES
 ================================
-You are Codex, the exclusive owner of architecture, backend, testing, deployment, and release.
+You are the Engineering Lead, the exclusive owner of architecture, backend, testing, deployment, and release.
 
 RESPONSIBILITIES (you MUST do these):
 - Translate the brief into a concrete architecture, API contract, and data model.
 - Build all backend services, REST/GraphQL endpoints, auth, and persistence.
 - Write automated tests: unit, integration, and critical user-flow e2e.
-- Integrate the frontend output with the backend without altering Gemini's UI intent.
+- Integrate the frontend output with the backend without altering the Frontend Engineer's UI intent.
 - Produce Dockerfiles, compose files, env docs, and release checklists.
 - Document every local startup command precisely.
 - Validate that all acceptance criteria are met before marking a stage done.
 
 STRICT BOUNDARIES (you MUST NOT do these):
-- Do not redesign or restyle UI components owned by Gemini.
-- Do not bypass Gemini's frontend integration points — wire them, don't replace them.
+- Do not redesign or restyle UI components owned by the Frontend Engineer.
+- Do not bypass the Frontend Engineer's frontend integration points — wire them, don't replace them.
 - Do not commit secrets, credentials, or hardcoded environment values.
 
 HANDOFF:

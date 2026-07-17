@@ -1,0 +1,484 @@
+import ignore, { type Ignore } from 'ignore';
+import fs from 'fs/promises';
+import nodePath from 'path';
+import type { Path } from 'path-scurry';
+import { logger } from '../core/logger.js';
+
+const DEFAULT_IGNORE_LIST = new Set([
+  // Version Control
+  '.git',
+  '.svn',
+  '.hg',
+  '.bzr',
+
+  // IDEs & Editors
+  '.idea',
+  '.vscode',
+  '.vs',
+  '.eclipse',
+  '.settings',
+  '.DS_Store',
+  'Thumbs.db',
+
+  // Dependencies
+  'node_modules',
+  'bower_components',
+  'jspm_packages',
+  'vendor', // PHP/Go
+  'third_party', // C/C++ (Google-style vendored dependencies)
+  '3rdparty', // C/C++ (alternate spelling, also Qt convention)
+  // 'packages' removed - commonly used for monorepo source code (lerna, pnpm, yarn workspaces)
+  'venv',
+  '.venv',
+  'env',
+  '.env',
+  '__pycache__',
+  '.pytest_cache',
+  '.mypy_cache',
+  'site-packages',
+  '.tox',
+  'eggs',
+  '.eggs',
+  'lib64',
+  'parts',
+  'sdist',
+  'wheels',
+
+  // Build Outputs
+  'dist',
+  'build',
+  'out',
+  'output',
+  'bin',
+  'obj',
+  'target', // Java/Rust
+  '.next',
+  '.nuxt',
+  '.output',
+  '.vercel',
+  '.netlify',
+  '.serverless',
+  '_build',
+  'public/build',
+  '.parcel-cache',
+  '.turbo',
+  '.svelte-kit',
+
+  // Test & Coverage
+  'coverage',
+  '.nyc_output',
+  'htmlcov',
+  '.coverage',
+  '__tests__', // Often just test files
+  '__mocks__',
+  '.jest',
+
+  // Logs & Temp
+  'logs',
+  'log',
+  'tmp',
+  'temp',
+  'cache',
+  '.cache',
+  '.tmp',
+  '.temp',
+
+  // Generated/Compiled
+  '.generated',
+  'generated',
+  'auto-generated',
+  'monaco-workers', // Monaco editor web-worker bundles generated for browser runtime
+  '.terraform',
+  '.serverless',
+
+  // Documentation (optional - might want to keep)
+  // 'docs',
+  // 'documentation',
+
+  // Misc
+  '.husky',
+  '.github', // GitHub config, not code
+  '.circleci',
+  '.gitlab',
+  'fixtures', // Test fixtures
+  'snapshots', // Jest snapshots
+  '__snapshots__',
+]);
+
+const IGNORED_EXTENSIONS = new Set([
+  // Images
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.svg',
+  '.ico',
+  '.webp',
+  '.bmp',
+  '.tiff',
+  '.tif',
+  '.psd',
+  '.ai',
+  '.sketch',
+  '.fig',
+  '.xd',
+
+  // Archives
+  '.zip',
+  '.tar',
+  '.gz',
+  '.rar',
+  '.7z',
+  '.bz2',
+  '.xz',
+  '.tgz',
+
+  // Binary/Compiled
+  '.exe',
+  '.dll',
+  '.so',
+  '.dylib',
+  '.a',
+  '.lib',
+  '.o',
+  '.obj',
+  '.class',
+  '.jar',
+  '.war',
+  '.ear',
+  '.pyc',
+  '.pyo',
+  '.pyd',
+  '.beam', // Erlang
+  '.wasm', // WebAssembly - important!
+  '.node', // Native Node addons
+
+  // Documents
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  '.odt',
+  '.ods',
+  '.odp',
+
+  // Media
+  '.mp4',
+  '.mp3',
+  '.wav',
+  '.mov',
+  '.avi',
+  '.mkv',
+  '.flv',
+  '.wmv',
+  '.ogg',
+  '.webm',
+  '.flac',
+  '.aac',
+  '.m4a',
+
+  // Fonts
+  '.woff',
+  '.woff2',
+  '.ttf',
+  '.eot',
+  '.otf',
+
+  // Databases
+  '.db',
+  '.sqlite',
+  '.sqlite3',
+  '.mdb',
+  '.accdb',
+
+  // Minified/Bundled files
+  '.min.js',
+  '.min.css',
+  '.bundle.js',
+  '.chunk.js',
+
+  // Source maps (debug files, not source)
+  '.map',
+
+  // Lock files (handled separately, but also here)
+  '.lock',
+
+  // Certificates & Keys (security - don't index!)
+  '.pem',
+  '.key',
+  '.crt',
+  '.cer',
+  '.p12',
+  '.pfx',
+
+  // Data files (often large/binary)
+  '.csv',
+  '.tsv',
+  '.parquet',
+  '.avro',
+  '.feather',
+  '.npy',
+  '.npz',
+  '.pkl',
+  '.pickle',
+  '.h5',
+  '.hdf5',
+
+  // Misc binary
+  '.bin',
+  '.dat',
+  '.data',
+  '.raw',
+  '.iso',
+  '.img',
+  '.dmg',
+]);
+
+// Files to ignore by exact name
+const IGNORED_FILES = new Set([
+  'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
+  'composer.lock',
+  'Gemfile.lock',
+  'poetry.lock',
+  'Cargo.lock',
+  'go.sum',
+  '.gitignore',
+  '.gitattributes',
+  '.npmrc',
+  '.yarnrc',
+  '.editorconfig',
+  '.prettierrc',
+  '.prettierignore',
+  '.eslintignore',
+  '.dockerignore',
+  'Thumbs.db',
+  '.DS_Store',
+  'LICENSE',
+  'LICENSE.md',
+  'LICENSE.txt',
+  'CHANGELOG.md',
+  'CHANGELOG',
+  'CONTRIBUTING.md',
+  'CODE_OF_CONDUCT.md',
+  'SECURITY.md',
+  '.env',
+  '.env.local',
+  '.env.development',
+  '.env.production',
+  '.env.test',
+  '.env.example',
+]);
+
+// The hardcoded DEFAULT_IGNORE_LIST is the "safety net" default: directories
+// that are almost never source code (node_modules, .git, dist, __tests__,
+// etc.). Users who legitimately need to index one of these can negate the
+// hardcoded rule via a `!pattern` line in `.gitnexusignore` (#771) — same
+// semantics as `.gitignore` negation. That override is applied in
+// `createIgnoreFilter` below; `shouldIgnorePath` itself stays a pure
+// hardcoded-list check so its callers (wiki generator, tests) get
+// deterministic results independent of per-repo config.
+export const shouldIgnorePath = (filePath: string): boolean => {
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const normalizedPathLower = normalizedPath.toLowerCase();
+  const parts = normalizedPath.split('/');
+  const fileName = parts[parts.length - 1];
+  const fileNameLower = fileName.toLowerCase();
+
+  // Laravel compiles Blade templates into generated PHP cache files under
+  // storage/framework/views.  Source templates live in resources/views and are
+  // handled separately; compiled cache should not become source-of-truth. Keep
+  // storage/framework/cache parseable unless a separate warning source is proven:
+  // Laravel route/config cache files are ordinary generated PHP, not Blade.
+  if (/(^|\/)storage\/framework\/views(\/|$)/.test(normalizedPathLower)) {
+    return true;
+  }
+
+  // Check if any path segment is in the hardcoded ignore list.
+  for (const part of parts) {
+    if (DEFAULT_IGNORE_LIST.has(part)) {
+      return true;
+    }
+  }
+
+  // Check exact filename matches
+  if (IGNORED_FILES.has(fileName) || IGNORED_FILES.has(fileNameLower)) {
+    return true;
+  }
+
+  // Check extension
+  const lastDotIndex = fileNameLower.lastIndexOf('.');
+  if (lastDotIndex !== -1) {
+    const ext = fileNameLower.substring(lastDotIndex);
+    if (IGNORED_EXTENSIONS.has(ext)) return true;
+
+    // Handle compound extensions like .min.js, .bundle.js
+    const secondLastDot = fileNameLower.lastIndexOf('.', lastDotIndex - 1);
+    if (secondLastDot !== -1) {
+      const compoundExt = fileNameLower.substring(secondLastDot);
+      if (IGNORED_EXTENSIONS.has(compoundExt)) return true;
+    }
+  }
+
+  // Ignore files that look like generated/bundled code
+  if (
+    fileNameLower.includes('.bundle.') ||
+    fileNameLower.includes('.chunk.') ||
+    fileNameLower.includes('.generated.') ||
+    fileNameLower.endsWith('.d.ts')
+  ) {
+    // TypeScript declaration files
+    return true;
+  }
+
+  return false;
+};
+
+/** Check if a directory name is in the hardcoded ignore list */
+export const isHardcodedIgnoredDirectory = (name: string): boolean => {
+  return DEFAULT_IGNORE_LIST.has(name);
+};
+
+/**
+ * Load .gitignore and .gitnexusignore rules from the repo root.
+ * Returns an `ignore` instance with all patterns, or null if no files found.
+ */
+export interface IgnoreOptions {
+  /** Skip .gitignore parsing, only read .gitnexusignore. Defaults to GITNEXUS_NO_GITIGNORE env var. */
+  noGitignore?: boolean;
+}
+
+export const loadIgnoreRules = async (
+  repoPath: string,
+  options?: IgnoreOptions,
+): Promise<Ignore | null> => {
+  const ig = ignore();
+  let hasRules = false;
+
+  // Allow users to bypass .gitignore parsing (e.g. when .gitignore accidentally excludes source files)
+  const skipGitignore = options?.noGitignore ?? !!process.env.GITNEXUS_NO_GITIGNORE;
+  const filenames = skipGitignore ? ['.gitnexusignore'] : ['.gitignore', '.gitnexusignore'];
+
+  for (const filename of filenames) {
+    try {
+      const content = await fs.readFile(nodePath.join(repoPath, filename), 'utf-8');
+      ig.add(content);
+      hasRules = true;
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        logger.warn(`  Warning: could not read ${filename}: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  return hasRules ? ig : null;
+};
+
+/**
+ * Walk ancestor segments of `rel` and check whether `.gitnexusignore`
+ * (or `.gitignore`) contains an explicit `!pattern` negation that
+ * applies. Returns true as soon as any segment — or the path itself —
+ * is matched by a negation rule.
+ *
+ * Why this exists (#771): the hardcoded DEFAULT_IGNORE_LIST would
+ * otherwise block indexing of directories like `__tests__/` even when
+ * the user has an explicit `!__tests__/` line in `.gitnexusignore`.
+ * Mirroring `.gitignore` negation semantics: a user's explicit
+ * unignore of a parent directory implicitly unignores everything
+ * underneath, so we walk the ancestor chain rather than only testing
+ * the leaf.
+ *
+ * The `ignore` package's `test(path)` returns `{ignored, unignored}`;
+ * `unignored: true` is the "a negation rule matched this path"
+ * signal. Children of a negated directory return
+ * `{ignored: false, unignored: false}` on a direct test, which is why
+ * we also walk the ancestors here.
+ */
+const hasExplicitUnignore = (ig: Ignore, rel: string): boolean => {
+  // Direct match on the path (as a file).
+  if (ig.test(rel).unignored) return true;
+  // Direct match on the path treated as a directory — `!dir/` matches
+  // here when rel is the directory itself.
+  if (ig.test(rel + '/').unignored) return true;
+  // Walk ancestor segments. `!parent/` should propagate to every
+  // descendant the same way `.gitignore` negation propagates.
+  const parts = rel.split('/');
+  for (let i = parts.length - 1; i > 0; i--) {
+    const ancestor = parts.slice(0, i).join('/') + '/';
+    if (ig.test(ancestor).unignored) return true;
+  }
+  return false;
+};
+
+/**
+ * Create a glob-compatible ignore filter combining:
+ * - .gitignore / .gitnexusignore patterns (via `ignore` package)
+ * - Hardcoded DEFAULT_IGNORE_LIST, IGNORED_EXTENSIONS, IGNORED_FILES
+ *
+ * Returns an IgnoreLike object for glob's `ignore` option,
+ * enabling directory-level pruning during traversal.
+ *
+ * Precedence (#771): user's `.gitnexusignore` negation patterns take
+ * priority over the hardcoded list, matching `.gitignore` semantics.
+ * An explicit `!pattern` rule unignores descendants even when they
+ * would otherwise be blocked by DEFAULT_IGNORE_LIST — UNLESS a more
+ * specific rule in the same file re-ignores a subset (e.g.
+ * `!__tests__/` paired with `__tests__/generated/` blocks the child
+ * while leaving the parent negated). Last-match-wins is enforced by
+ * consulting `ig.ignores(rel)` after `hasExplicitUnignore`.
+ */
+export const createIgnoreFilter = async (repoPath: string, options?: IgnoreOptions) => {
+  const ig = await loadIgnoreRules(repoPath, options);
+
+  return {
+    ignored(p: Path): boolean {
+      // path-scurry's Path.relative() returns POSIX paths on all platforms,
+      // which is what the `ignore` package expects. No explicit normalization needed.
+      const rel = p.relative();
+      if (!rel) return false;
+      // User's .gitnexusignore negation takes precedence over hardcoded
+      // rules (#771). If any ancestor or the path itself was explicitly
+      // unignored AND no more-specific rule re-ignores this exact path,
+      // allow it through. The `!ig.ignores(rel)` guard matches
+      // .gitignore's last-match-wins semantics: `!__tests__/` followed
+      // by `__tests__/generated/` negates the parent but still blocks
+      // the re-ignored child.
+      if (ig && hasExplicitUnignore(ig, rel) && !ig.ignores(rel)) return false;
+      // Check .gitignore / .gitnexusignore patterns
+      if (ig && ig.ignores(rel)) return true;
+      // Fall back to hardcoded rules
+      return shouldIgnorePath(rel);
+    },
+    childrenIgnored(p: Path): boolean {
+      // Note: dot-directories (.git, .vscode, etc.) are primarily excluded by
+      // glob's `dot: false` option in filesystem-walker.ts. The hardcoded
+      // list check below is defense-in-depth — do not remove `dot: false`
+      // assuming this covers it.
+      const rel = p.relative();
+      // User's .gitnexusignore negation takes precedence (#771) — if the
+      // user explicitly unignored this directory or any ancestor via a
+      // !pattern rule, allow descent even if the directory name is in
+      // DEFAULT_IGNORE_LIST. The `!ig.ignores(rel + '/')` guard keeps
+      // last-match-wins: `!__tests__/` + `__tests__/generated/` still
+      // blocks descent into `__tests__/generated/`.
+      if (ig && rel && hasExplicitUnignore(ig, rel) && !ig.ignores(rel + '/')) return false;
+      // Hardcoded list: block descent into well-known noise directories.
+      if (DEFAULT_IGNORE_LIST.has(p.name)) return true;
+      // Check against .gitignore / .gitnexusignore patterns.
+      // Since childrenIgnored is only called for directories, always test with
+      // a trailing slash. This ensures directory-only negation patterns (e.g.
+      // `!iOS/`) are applied correctly — without the slash, `ig.ignores('iOS')`
+      // treats the path as a file and misses the negation.
+      // Bare-name patterns (e.g. `local`) still match `local/` per gitignore spec:
+      // the `ignore` package normalizes `dir` and `dir/` to match directories.
+      // See: https://github.com/kaelzhang/node-ignore#2-filenames-and-dirnames
+      if (ig && rel && ig.ignores(rel + '/')) return true;
+      return false;
+    },
+  };
+};

@@ -1,0 +1,557 @@
+/**
+ * C and C++ language providers.
+ *
+ * Both languages use wildcard import semantics (headers expose all symbols
+ * via #include). Neither language has named binding extraction.
+ *
+ * C uses 'first-wins' MRO (no inheritance). C++ uses 'leftmost-base' MRO
+ * for its left-to-right multiple inheritance resolution order.
+ */
+
+import { SupportedLanguages } from 'gitnexus-shared';
+import { createClassExtractor } from '../class-extractors/generic.js';
+import { cClassConfig, cppClassConfig } from '../class-extractors/configs/c-cpp.js';
+import { defineLanguage } from '../language-provider.js';
+import type { AstFrameworkPatternConfig } from '../language-provider.js';
+import { typeConfig as cCppConfig } from '../type-extractors/c-cpp.js';
+import { cCppExportChecker } from '../export-detection.js';
+import { createImportResolver } from '../import-resolvers/resolver-factory.js';
+import { cImportConfig, cppImportConfig } from '../import-resolvers/configs/c-cpp.js';
+import { C_QUERIES, CPP_QUERIES } from '../tree-sitter-queries.js';
+
+/**
+ * Node types for standard function declarations that need C/C++ declarator handling.
+ * Used by cCppExtractFunctionName to determine how to extract the function name.
+ */
+const FUNCTION_DECLARATION_TYPES = new Set([
+  'function_declaration',
+  'function_definition',
+  'async_function_declaration',
+  'generator_function_declaration',
+  'function_item',
+]);
+import type { SyntaxNode } from '../utils/ast-helpers.js';
+import { createLeadingDocDescriptionExtractor } from '../utils/ast-helpers.js';
+import type { NodeLabel } from 'gitnexus-shared';
+import type { LanguageProvider } from '../language-provider.js';
+import { createFieldExtractor } from '../field-extractors/generic.js';
+import {
+  cConfig as cFieldConfig,
+  cppConfig as cppFieldConfig,
+} from '../field-extractors/configs/c-cpp.js';
+import { createMethodExtractor } from '../method-extractors/generic.js';
+import { cMethodConfig, cppMethodConfig } from '../method-extractors/configs/c-cpp.js';
+import { createVariableExtractor } from '../variable-extractors/generic.js';
+import { cVariableConfig, cppVariableConfig } from '../variable-extractors/configs/c-cpp.js';
+import { createCallExtractor } from '../call-extractors/generic.js';
+import { cCallConfig, cppCallConfig } from '../call-extractors/configs/c-cpp.js';
+import { stripUeMacros } from '../cpp-ue-preprocessor.js';
+import {
+  emitCScopeCaptures,
+  interpretCImport,
+  interpretCTypeBinding,
+  cArityCompatibility,
+  cBindingScopeFor,
+  cImportOwningScope,
+  cReceiverBinding,
+  collectCStaticLinkageSideChannel,
+} from './c/index.js';
+import {
+  emitCppScopeCaptures,
+  interpretCppImport,
+  interpretCppTypeBinding,
+  cppArityCompatibility,
+  cppBindingScopeFor,
+  cppImportOwningScope,
+  cppReceiverBinding,
+  collectCppCaptureSideChannel,
+} from './cpp/index.js';
+import {
+  extractCppTemplateConstraints,
+  type CppConstraintPayload,
+} from './cpp/constraint-extractor.js';
+import { assertCloneable } from '../workers/clone-safety.js';
+import { createCCfgVisitor, createCppCfgVisitor } from '../cfg/visitors/c-cpp.js';
+
+const C_BUILT_INS: ReadonlySet<string> = new Set([
+  'printf',
+  'fprintf',
+  'sprintf',
+  'snprintf',
+  'vprintf',
+  'vfprintf',
+  'vsprintf',
+  'vsnprintf',
+  'scanf',
+  'fscanf',
+  'sscanf',
+  'malloc',
+  'calloc',
+  'realloc',
+  'free',
+  'memcpy',
+  'memmove',
+  'memset',
+  'memcmp',
+  'strlen',
+  'strcpy',
+  'strncpy',
+  'strcat',
+  'strncat',
+  'strcmp',
+  'strncmp',
+  'strstr',
+  'strchr',
+  'strrchr',
+  'atoi',
+  'atol',
+  'atof',
+  'strtol',
+  'strtoul',
+  'strtoll',
+  'strtoull',
+  'strtod',
+  'sizeof',
+  'offsetof',
+  'typeof',
+  'assert',
+  'abort',
+  'exit',
+  '_exit',
+  'fopen',
+  'fclose',
+  'fread',
+  'fwrite',
+  'fseek',
+  'ftell',
+  'rewind',
+  'fflush',
+  'fgets',
+  'fputs',
+  'likely',
+  'unlikely',
+  'BUG',
+  'BUG_ON',
+  'WARN',
+  'WARN_ON',
+  'WARN_ONCE',
+  'IS_ERR',
+  'PTR_ERR',
+  'ERR_PTR',
+  'IS_ERR_OR_NULL',
+  'ARRAY_SIZE',
+  'container_of',
+  'list_for_each_entry',
+  'list_for_each_entry_safe',
+  'min',
+  'max',
+  'clamp',
+  'abs',
+  'swap',
+  'pr_info',
+  'pr_warn',
+  'pr_err',
+  'pr_debug',
+  'pr_notice',
+  'pr_crit',
+  'pr_emerg',
+  'printk',
+  'dev_info',
+  'dev_warn',
+  'dev_err',
+  'dev_dbg',
+  'GFP_KERNEL',
+  'GFP_ATOMIC',
+  'spin_lock',
+  'spin_unlock',
+  'spin_lock_irqsave',
+  'spin_unlock_irqrestore',
+  'mutex_lock',
+  'mutex_unlock',
+  'mutex_init',
+  'kfree',
+  'kmalloc',
+  'kzalloc',
+  'kcalloc',
+  'krealloc',
+  'kvmalloc',
+  'kvfree',
+  'get',
+  'put',
+]);
+
+const cClassExtractor = createClassExtractor(cClassConfig);
+
+const cppClassExtractor = createClassExtractor(cppClassConfig);
+
+/**
+ * C/C++ function name extraction — unwraps pointer_declarator / reference_declarator /
+ * function_declarator / qualified_identifier chains to find the actual function name.
+ * Handles field_identifier (method inside class body) and parenthesized_declarator.
+ */
+const cCppExtractFunctionName = (
+  node: SyntaxNode,
+): { funcName: string | null; label: NodeLabel } | null => {
+  if (!FUNCTION_DECLARATION_TYPES.has(node.type)) return null;
+
+  let funcName: string | null = null;
+  let label: NodeLabel = 'Function';
+
+  // C/C++: function_definition -> [pointer_declarator ->] function_declarator -> qualified_identifier/identifier
+  // Unwrap pointer_declarator / reference_declarator wrappers to reach function_declarator
+  let declarator = node.childForFieldName?.('declarator');
+  if (!declarator) {
+    for (let i = 0; i < node.childCount; i++) {
+      const c = node.child(i);
+      if (c?.type === 'function_declarator') {
+        declarator = c;
+        break;
+      }
+    }
+  }
+  while (
+    declarator &&
+    (declarator.type === 'pointer_declarator' || declarator.type === 'reference_declarator')
+  ) {
+    let nextDeclarator = declarator.childForFieldName?.('declarator');
+    if (!nextDeclarator) {
+      for (let i = 0; i < declarator.childCount; i++) {
+        const c = declarator.child(i);
+        if (
+          c?.type === 'function_declarator' ||
+          c?.type === 'pointer_declarator' ||
+          c?.type === 'reference_declarator'
+        ) {
+          nextDeclarator = c;
+          break;
+        }
+      }
+    }
+    declarator = nextDeclarator;
+  }
+  if (declarator) {
+    let innerDeclarator = declarator.childForFieldName?.('declarator');
+    if (!innerDeclarator) {
+      for (let i = 0; i < declarator.childCount; i++) {
+        const c = declarator.child(i);
+        if (
+          c?.type === 'qualified_identifier' ||
+          c?.type === 'identifier' ||
+          c?.type === 'field_identifier' ||
+          c?.type === 'operator_name' ||
+          c?.type === 'parenthesized_declarator'
+        ) {
+          innerDeclarator = c;
+          break;
+        }
+      }
+    }
+
+    if (innerDeclarator?.type === 'qualified_identifier') {
+      let nameNode = innerDeclarator.childForFieldName?.('name');
+      if (!nameNode) {
+        for (let i = 0; i < innerDeclarator.childCount; i++) {
+          const c = innerDeclarator.child(i);
+          if (c?.type === 'identifier' || c?.type === 'operator_name') {
+            nameNode = c;
+            break;
+          }
+        }
+      }
+      if (nameNode?.text) {
+        funcName = nameNode.text;
+        label = 'Method';
+      }
+    } else if (
+      innerDeclarator?.type === 'identifier' ||
+      innerDeclarator?.type === 'field_identifier' ||
+      innerDeclarator?.type === 'operator_name'
+    ) {
+      // field_identifier is used for method names inside C++ class bodies
+      funcName = innerDeclarator.text;
+      if (innerDeclarator.type === 'field_identifier') label = 'Method';
+    } else if (innerDeclarator?.type === 'parenthesized_declarator') {
+      let nestedId: SyntaxNode | null = null;
+      for (let i = 0; i < innerDeclarator.childCount; i++) {
+        const c = innerDeclarator.child(i);
+        if (c?.type === 'qualified_identifier' || c?.type === 'identifier') {
+          nestedId = c;
+          break;
+        }
+      }
+      if (nestedId?.type === 'qualified_identifier') {
+        let nameNode = nestedId.childForFieldName?.('name');
+        if (!nameNode) {
+          for (let i = 0; i < nestedId.childCount; i++) {
+            const c = nestedId.child(i);
+            if (c?.type === 'identifier' || c?.type === 'operator_name') {
+              nameNode = c;
+              break;
+            }
+          }
+        }
+        if (nameNode?.text) {
+          funcName = nameNode.text;
+          label = 'Method';
+        }
+      } else if (nestedId?.type === 'identifier') {
+        funcName = nestedId.text;
+      }
+    }
+  }
+
+  // Fallback for other node types in FUNCTION_DECLARATION_TYPES (e.g. function_item for Rust in C++ tree)
+  if (!funcName) {
+    let nameNode = node.childForFieldName?.('name');
+    if (!nameNode) {
+      for (let i = 0; i < node.childCount; i++) {
+        const c = node.child(i);
+        if (
+          c?.type === 'identifier' ||
+          c?.type === 'property_identifier' ||
+          c?.type === 'simple_identifier'
+        ) {
+          nameNode = c;
+          break;
+        }
+      }
+    }
+    funcName = nameNode?.text ?? null;
+  }
+
+  return { funcName, label };
+};
+
+/** Check if a C/C++ function_definition is inside a class or struct body
+ *  (and NOT a friend declaration).
+ *  Used by cppLabelOverride to skip duplicate function captures
+ *  that are already covered by definition.method queries.
+ *  Friend functions are free functions defined inside class bodies —
+ *  they must NOT be skipped (ISO C++ hidden-friend idiom). */
+function isCppInsideClassOrStruct(functionNode: SyntaxNode): boolean {
+  let ancestor: SyntaxNode | null = functionNode?.parent ?? null;
+  while (ancestor) {
+    // Friend declarations: the function_definition is wrapped in
+    // `friend_declaration` → `field_declaration_list` → class_specifier.
+    // These are free functions, not methods — don't skip them.
+    if (ancestor.type === 'friend_declaration') return false;
+    if (ancestor.type === 'class_specifier' || ancestor.type === 'struct_specifier') return true;
+    ancestor = ancestor.parent;
+  }
+  return false;
+}
+
+/** Label override shared by C and C++: skip function_definition captures inside class/struct
+ *  bodies (they're duplicates of definition.method captures). */
+const cppLabelOverride: NonNullable<LanguageProvider['labelOverride']> = (
+  functionNode,
+  defaultLabel,
+) => {
+  if (defaultLabel !== 'Function') return defaultLabel;
+  return isCppInsideClassOrStruct(functionNode) ? null : defaultLabel;
+};
+
+export const cProvider = defineLanguage({
+  id: SupportedLanguages.C,
+  extensions: ['.c'],
+  entryPointPatterns: [
+    /^main$/,
+    /^init_/,
+    /_init$/,
+    /^start_/,
+    /_start$/,
+    /^run_/,
+    /_run$/,
+    /^stop_/,
+    /_stop$/,
+    /^open_/,
+    /_open$/,
+    /^close_/,
+    /_close$/,
+    /^create_/,
+    /_create$/,
+    /^destroy_/,
+    /_destroy$/,
+    /^handle_/,
+    /_handler$/,
+    /_callback$/,
+    /^cmd_/,
+    /^server_/,
+    /^client_/,
+    /^session_/,
+    /^window_/,
+    /^key_/,
+    /^input_/,
+    /^output_/,
+    /^notify_/,
+    /^control_/,
+  ],
+  treeSitterQueries: C_QUERIES,
+  typeConfig: cCppConfig,
+  exportChecker: cCppExportChecker,
+  importResolver: createImportResolver(cImportConfig),
+  callExtractor: createCallExtractor(cCallConfig),
+  fieldExtractor: createFieldExtractor(cFieldConfig),
+  methodExtractor: createMethodExtractor({
+    ...cMethodConfig,
+    extractFunctionName: cCppExtractFunctionName,
+  }),
+  variableExtractor: createVariableExtractor(cVariableConfig),
+  classExtractor: cClassExtractor,
+  // ── Doxygen doc comment → description (issue #2270) ──
+  descriptionExtractor: createLeadingDocDescriptionExtractor(),
+  labelOverride: cppLabelOverride,
+  builtInNames: C_BUILT_INS,
+
+  // ── RFC #909 Ring 3: scope-based resolution hooks (RFC §5) ──────────
+  emitScopeCaptures: emitCScopeCaptures,
+  cfgVisitor: createCCfgVisitor(),
+  // Worker-side: snapshot the module-level `static`-linkage marks
+  // `emitCScopeCaptures` just populated for this file (`markStaticName` →
+  // `staticNames`) into plain data on `ParsedFile.captureSideChannel`, so the
+  // main thread can restore them via `applyCaptureSideChannel` WITHOUT a
+  // re-parse (#1983 — the worker is the sole parse path). Without this, C
+  // `static` functions look non-file-local on the main thread and leak into
+  // cross-file global free-call resolution / wildcard imports. See
+  // `c/capture-side-channel.ts`.
+  // `assertCloneable` is a runtime identity; it makes a future non-serializable
+  // value in the side-channel payload a compile error here, at the source, rather
+  // than a DataCloneError at the worker boundary (#2143).
+  collectCaptureSideChannel: (filePath) =>
+    assertCloneable(collectCStaticLinkageSideChannel(filePath)),
+  interpretImport: interpretCImport,
+  interpretTypeBinding: interpretCTypeBinding,
+  bindingScopeFor: cBindingScopeFor,
+  importOwningScope: cImportOwningScope,
+  receiverBinding: cReceiverBinding,
+  arityCompatibility: cArityCompatibility,
+  // mergeBindings + resolveImportTarget live on ScopeResolver (see c/scope-resolver.ts).
+});
+
+export const cppProvider = defineLanguage({
+  id: SupportedLanguages.CPlusPlus,
+  // CUDA files route through tree-sitter-cpp as a conservative C++-subset parser:
+  // definitions still extract, but CUDA launch syntax (`<<< >>>`) is not modeled as calls.
+  extensions: ['.cpp', '.cc', '.cxx', '.h', '.hpp', '.hxx', '.hh', '.cu', '.cuh'],
+  entryPointPatterns: [
+    /^main$/,
+    /^init_/,
+    /_init$/,
+    /^Create[A-Z]/,
+    /^create_/,
+    /^Run$/,
+    /^run$/,
+    /^Start$/,
+    /^start$/,
+    /^handle_/,
+    /_handler$/,
+    /_callback$/,
+    /^OnEvent/,
+    /^on_/,
+    /::Run$/,
+    /::Start$/,
+    /::Init$/,
+    /::Execute$/,
+  ],
+  astFrameworkPatterns: [
+    {
+      framework: 'qt',
+      entryPointMultiplier: 2.8,
+      reason: 'qt-macro',
+      patterns: [
+        'Q_OBJECT',
+        'Q_INVOKABLE',
+        'Q_PROPERTY',
+        'Q_SIGNALS',
+        'Q_SLOTS',
+        'Q_SIGNAL',
+        'Q_SLOT',
+        'QWidget',
+        'QApplication',
+      ],
+    },
+  ] satisfies AstFrameworkPatternConfig[],
+  treeSitterQueries: CPP_QUERIES,
+  preprocessSource: stripUeMacros,
+  typeConfig: cCppConfig,
+  exportChecker: cCppExportChecker,
+  importResolver: createImportResolver(cppImportConfig),
+  mroStrategy: 'leftmost-base',
+  callExtractor: createCallExtractor(cppCallConfig),
+  fieldExtractor: createFieldExtractor(cppFieldConfig),
+  methodExtractor: createMethodExtractor({
+    ...cppMethodConfig,
+    extractFunctionName: cCppExtractFunctionName,
+  }),
+  variableExtractor: createVariableExtractor(cppVariableConfig),
+  classExtractor: cppClassExtractor,
+  // ── Doxygen doc comment → description (issue #2270) ──
+  descriptionExtractor: createLeadingDocDescriptionExtractor(),
+  labelOverride: cppLabelOverride,
+  builtInNames: C_BUILT_INS,
+  extractTemplateConstraints: extractCppTemplateConstraintsForProvider,
+
+  // ── RFC #909 Ring 3: scope-based resolution hooks (RFC §5) ──────────
+  emitScopeCaptures: emitCppScopeCaptures,
+  cfgVisitor: createCppCfgVisitor(),
+  // Worker-side: snapshot the module-level capture marks `emitCppScopeCaptures`
+  // just populated for this file into plain data on `ParsedFile.captureSideChannel`,
+  // so the main thread can restore them via `applyCaptureSideChannel` WITHOUT a
+  // re-parse (#1983). See `cpp/capture-side-channel.ts`.
+  collectCaptureSideChannel: (filePath) => assertCloneable(collectCppCaptureSideChannel(filePath)),
+  interpretImport: interpretCppImport,
+  interpretTypeBinding: interpretCppTypeBinding,
+  bindingScopeFor: cppBindingScopeFor,
+  importOwningScope: cppImportOwningScope,
+  receiverBinding: cppReceiverBinding,
+  arityCompatibility: cppArityCompatibility,
+  // mergeBindings + resolveImportTarget live on ScopeResolver (see cpp/scope-resolver.ts).
+});
+
+/**
+ * LanguageProvider hook: walk from a function definition node up to its
+ * enclosing `template_declaration` and extract the SFINAE / `requires`-
+ * clause constraint payload. Used by `parsing-processor` to fingerprint
+ * the graph node ID so two SFINAE overloads with identical
+ * `parameterTypes` get distinct nodes (issue #1579).
+ *
+ * Returns `undefined` for non-templated functions and for templated
+ * functions whose constraints the extractor can't model — both cases
+ * result in no constraint suffix on the node ID.
+ */
+function extractCppTemplateConstraintsForProvider(
+  definitionNode: SyntaxNode,
+): CppConstraintPayload | undefined {
+  // Walk up to the enclosing template_declaration. Bound the walk so we
+  // can't accidentally land on a far-ancestor template_declaration that
+  // wraps an unrelated function.
+  let cur: SyntaxNode | null = definitionNode.parent;
+  let hops = 8;
+  let templateDecl: SyntaxNode | null = null;
+  while (cur !== null && hops-- > 0) {
+    if (cur.type === 'template_declaration') {
+      templateDecl = cur;
+      break;
+    }
+    if (cur.type === 'translation_unit') break;
+    cur = cur.parent;
+  }
+  if (templateDecl === null) return undefined;
+
+  // Find the function_declarator inside the function definition so the
+  // extractor can map template params to function-argument indices.
+  let declarator: SyntaxNode | null = definitionNode.childForFieldName('declarator');
+  let walk = 8;
+  while (declarator !== null && walk-- > 0) {
+    if (declarator.type === 'function_declarator') break;
+    if (declarator.type === 'pointer_declarator' || declarator.type === 'reference_declarator') {
+      declarator = declarator.childForFieldName('declarator');
+      continue;
+    }
+    break;
+  }
+  // Guard the boundary at the source: a future non-cloneable member of the
+  // constraint payload becomes a compile error here, not a runtime
+  // DataCloneError at the worker post (#2143).
+  return assertCloneable(extractCppTemplateConstraints(templateDecl, declarator));
+}

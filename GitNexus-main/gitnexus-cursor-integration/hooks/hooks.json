@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hooks": {
+    "postToolUse": [
+      {
+        "matcher": "Shell|Read|Grep",
+        "command": "node ./hooks/gitnexus-hook.cjs",
+        "timeout": 10
+      }
+    ]
+  }
+}

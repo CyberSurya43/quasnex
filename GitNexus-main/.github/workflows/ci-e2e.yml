@@ -1,0 +1,98 @@
+name: E2E Tests
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check-changes:
+    name: Check web module changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      web_changed: ${{ steps.filter.outputs.web }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v3
+        id: filter
+        with:
+          filters: |
+            web:
+              - 'gitnexus-web/**'
+
+  e2e:
+    name: e2e (chromium)
+    needs: check-changes
+    if: needs.check-changes.result == 'success' && needs.check-changes.outputs.web_changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Configure e2e GitNexus home
+        run: echo "GITNEXUS_HOME=${RUNNER_TEMP}/gitnexus-home" >> "$GITHUB_ENV"
+
+      - uses: ./.github/actions/setup-gitnexus-web
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+        working-directory: gitnexus-web
+
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: gitnexus
+
+      - name: Build backend
+        run: npm run build
+        working-directory: gitnexus
+
+      - name: Analyze repository (index for backend)
+        run: |
+          E2E_REPO="${RUNNER_TEMP}/gitnexus-e2e-repo"
+          rm -rf "${E2E_REPO}"
+          mkdir -p "${E2E_REPO}"
+          cp -R gitnexus/test/fixtures/mini-repo/src "${E2E_REPO}/src"
+          printf '%s\n' '{"name":"e2e-mini-repo","version":"0.0.0","private":true}' > "${E2E_REPO}/package.json"
+          node gitnexus/dist/cli/index.js analyze "${E2E_REPO}" --skip-git --skip-agents-md --name e2e-mini-repo
+          if [ ! -d "${E2E_REPO}/.gitnexus" ]; then
+            echo "::error::No fixture .gitnexus index created"
+            exit 1
+          fi
+
+      - name: Start backend server
+        run: node dist/cli/index.js serve &
+        working-directory: gitnexus
+
+      - name: Wait for backend readiness
+        run: npx wait-on http://localhost:4747/api/repos --timeout 30000
+        working-directory: gitnexus-web
+
+      - name: Start Vite dev server
+        run: npm run dev &
+        working-directory: gitnexus-web
+
+      - name: Wait for Vite dev server
+        run: npx wait-on http://localhost:5173 --timeout 30000
+        working-directory: gitnexus-web
+
+      - name: Run E2E tests
+        run: npx playwright test
+        working-directory: gitnexus-web
+        env:
+          E2E: '1'
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-results
+          path: |
+            gitnexus-web/test-results/
+            gitnexus-web/playwright-report/
+          retention-days: 5

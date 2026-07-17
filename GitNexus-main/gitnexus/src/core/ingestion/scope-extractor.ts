@@ -1,0 +1,1200 @@
+/**
+ * `ScopeExtractor` — the central, source-agnostic driver that turns a
+ * language provider's `CaptureMatch[]` into a `ParsedFile`
+ * (RFC §5.3 + §3.2 Phase 1; Ring 2 PKG #919).
+ *
+ * Exactly one entry point: `extract(matches, filePath, provider) → ParsedFile`.
+ * Runs a five-pass pipeline over the matches. Each pass is internal; the
+ * public contract is the output `ParsedFile`.
+ *
+ * ## Design principles
+ *
+ *   - **Source-agnostic.** Consumes `CaptureMatch[]` from providers;
+ *     doesn't know whether they came from tree-sitter queries or COBOL's
+ *     regex tagger. No `Tree` / `SyntaxNode` types leak into this file.
+ *   - **One AST walk per language.** Providers do the AST walk inside
+ *     their `emitScopeCaptures` hook; this driver does zero further
+ *     traversal — it consumes captures only.
+ *   - **Pure-ish.** The extractor itself is pure (same matches →
+ *     same ParsedFile) when providers are pure. No side effects, no I/O.
+ *   - **Centralized invariant enforcement.** Structural invariants on the
+ *     scope tree (non-module has parent; parent contains child; siblings
+ *     don't overlap) are enforced by `buildScopeTree` from Ring 2 SHARED
+ *     (#912). Malformed inputs throw `ScopeTreeInvariantError`.
+ *
+ * ## The five passes
+ *
+ *   1. **Build scope tree.** Walk `@scope.*` matches. For each, consult
+ *      `provider.resolveScopeKind` (default: suffix of the capture name).
+ *      Derive parent by lexical-range containment. Hand the resulting
+ *      `Scope[]` to `buildScopeTree` for validation.
+ *   2. **Attach declarations + local bindings.** Walk `@declaration.*`
+ *      matches. For each, build a `SymbolDefinition` and attach it to
+ *      `provider.bindingScopeFor` (default: innermost containing scope)
+ *      as `ownedDefs` + a local `BindingRef { origin: 'local' }`.
+ *   3. **Collect raw imports.** Walk `@import.*` matches. Call
+ *      `provider.interpretImport` per match; attach the returned
+ *      `ParsedImport` to the ParsedFile (not to any `Scope` — finalize
+ *      reconstructs the owning scope via `provider.importOwningScope`
+ *      during Phase 2).
+ *   4. **Collect type bindings.** Walk `@type-binding.*` matches. Call
+ *      `provider.interpretTypeBinding` per match. Attach the resulting
+ *      `TypeRef` to the innermost containing scope's `typeBindings`
+ *      (or override via `provider.bindingScopeFor` if set).
+ *   5. **Collect reference sites.** Walk `@reference.*` matches. Emit
+ *      one `ReferenceSite` per match. Classify call form via
+ *      `provider.classifyCallForm` (default: the capture's sub-tag if
+ *      present; else `'free'`).
+ *
+ * ## What gets attached where
+ *
+ *   - `Scope.bindings`     — **local bindings only** at this stage (Pass 2).
+ *                            Finalize (#915) merges imports/wildcards on top.
+ *   - `Scope.ownedDefs`    — declarations structurally owned by this scope.
+ *   - `Scope.typeBindings` — local type facts (parameter annotations, `self`).
+ *   - `Scope.imports`      — empty here. Populated by the finalize algorithm
+ *                            when it resolves `ParsedImport.targetRaw`.
+ *   - `ParsedFile.parsedImports` — every raw import in this file.
+ *   - `ParsedFile.localDefs`     — flattened union of `Scope.ownedDefs`.
+ *   - `ParsedFile.referenceSites` — pre-resolution usage facts.
+ */
+
+import type {
+  BindingRef,
+  CaptureMatch,
+  ImportEdge,
+  ParameterTypeClass,
+  ParsedFile,
+  ParsedImport,
+  ReferenceSite,
+  ReferenceKind,
+  Range,
+  Scope,
+  ScopeId,
+  ScopeKind,
+  SymbolDefinition,
+  TypeRef,
+} from 'gitnexus-shared';
+import { buildPositionIndex, buildScopeTree, canParentScope, makeScopeId } from 'gitnexus-shared';
+import type { LanguageProvider } from './language-provider.js';
+import { extractTemplateArguments } from './utils/template-arguments.js';
+
+// ─── Narrow hook surface the extractor actually uses ───────────────────────
+
+/**
+ * The subset of `LanguageProvider` hooks that `extract()` reads. Declared
+ * as its own type so:
+ *
+ *   - Tests can implement just these six hooks without faking the whole
+ *     `LanguageProvider` interface (which is ~40 fields including the
+ *     legacy-DAG surface).
+ *   - The extractor's dependency contract stays explicit — adding a new
+ *     hook read requires updating this type.
+ *
+ * Real callers pass a full `LanguageProvider` — structural typing makes it
+ * a `ScopeExtractorHooks` for free.
+ */
+export type ScopeExtractorHooks = Pick<
+  LanguageProvider,
+  | 'resolveScopeKind'
+  | 'bindingScopeFor'
+  | 'interpretImport'
+  | 'interpretTypeBinding'
+  | 'classifyCallForm'
+>;
+
+// ─── Public entry point ─────────────────────────────────────────────────────
+
+/**
+ * Drive the five extraction passes and return a `ParsedFile`.
+ *
+ * Throws `ScopeTreeInvariantError` (from #912) when the provider emits
+ * captures that violate structural scope invariants (e.g., overlapping
+ * sibling scopes). When no `@scope.module` capture is present, a
+ * synthetic Module scope is created spanning all captures, and orphan
+ * non-Module scopes are re-parented under it. This enables indexing of
+ * files where tree-sitter produces an ERROR root (e.g., complex .phtml
+ * templates with mixed PHP/HTML/JS).
+ */
+export function extract(
+  matches: readonly CaptureMatch[],
+  filePath: string,
+  provider: ScopeExtractorHooks,
+): ParsedFile {
+  // Partition matches by topic up front — one linear pass over the input.
+  const partitioned = partitionByTopic(matches);
+
+  // ── Pass 1: build the scope tree ─────────────────────────────────────
+  const scopeDrafts = pass1BuildScopes(partitioned.scope, filePath, provider);
+  const moduleScope = ensureModuleScope(scopeDrafts, filePath, matches);
+  // Re-parent orphan drafts (parent === null, non-Module) under the
+  // Module scope. Replaces drafts with new ones carrying the correct
+  // parent — runs before content passes so bindings/ownedDefs are empty.
+  for (let i = 0; i < scopeDrafts.length; i++) {
+    const d = scopeDrafts[i];
+    if (d.parent === null && d.kind !== 'Module') {
+      scopeDrafts[i] = makeDraft(d.id, moduleScope.id, d.kind, d.range, d.filePath);
+    }
+  }
+  const scopes = scopeDrafts.map(draftToScope);
+  // buildScopeTree validates invariants (throws on violation) and exposes
+  // the lookup contract consumed by Passes 2-5.
+  //
+  // **Snapshot semantics.** Both `scopeTree` and `positionIndex` are built
+  // from the post-Pass-1 `scopes` — parent/range/kind are accurate, but
+  // `bindings`, `ownedDefs`, and `typeBindings` are all empty here. Later
+  // passes write into the *drafts*, not into these snapshots; any hook
+  // that reads `scope.bindings` etc. via the `scopeTree` argument sees a
+  // structural view only. This is by design — hooks use scopeTree for
+  // "what's the parent chain?" queries, not for content queries.
+  const scopeTree = buildScopeTree(scopes);
+  const positionIndex = buildPositionIndex(scopes);
+
+  // ── Pass 2: attach declarations + local bindings ────────────────────
+  const localDefs: SymbolDefinition[] = [];
+  pass2AttachDeclarations(
+    partitioned.declaration,
+    scopeDrafts,
+    positionIndex,
+    localDefs,
+    filePath,
+    provider,
+    scopeTree,
+  );
+
+  // ── Pass 3: collect raw imports ─────────────────────────────────────
+  const parsedImports: ParsedImport[] = [];
+  pass3CollectImports(partitioned.import_, parsedImports, provider);
+
+  // ── Pass 4: collect type bindings ───────────────────────────────────
+  pass4CollectTypeBindings(
+    partitioned.typeBinding,
+    scopeDrafts,
+    positionIndex,
+    filePath,
+    provider,
+    scopeTree,
+  );
+
+  // ── Pass 5: collect reference sites ─────────────────────────────────
+  const referenceSites: ReferenceSite[] = [];
+  pass5CollectReferences(
+    partitioned.reference,
+    positionIndex,
+    filePath,
+    referenceSites,
+    provider,
+    scopeTree,
+  );
+
+  // Freeze Scope drafts into final shape and return.
+  const frozenScopes = scopeDrafts.map(draftToScope);
+  return Object.freeze({
+    filePath,
+    moduleScope: moduleScope.id,
+    scopes: Object.freeze(frozenScopes),
+    parsedImports: Object.freeze(parsedImports.slice()),
+    localDefs: Object.freeze(localDefs.slice()),
+    referenceSites: Object.freeze(referenceSites.slice()),
+  });
+}
+
+// ─── Internal: partitioning by topic ───────────────────────────────────────
+
+interface Partitioned {
+  readonly scope: readonly CaptureMatch[];
+  readonly declaration: readonly CaptureMatch[];
+  readonly import_: readonly CaptureMatch[];
+  readonly typeBinding: readonly CaptureMatch[];
+  readonly reference: readonly CaptureMatch[];
+}
+
+/**
+ * Bucket each match by the topic of its anchor capture. The anchor is the
+ * capture whose name is prefixed with the match's topic (`@scope.*`,
+ * `@declaration.*`, `@import.*`, `@type-binding.*`, `@reference.*`).
+ *
+ * A match may contain additional captures (e.g., `@import.source`,
+ * `@declaration.class.name`) that are used by the provider hooks to
+ * decode details. Those live inside the `CaptureMatch` and are surfaced
+ * to hooks verbatim — the extractor itself only routes by anchor.
+ */
+function partitionByTopic(matches: readonly CaptureMatch[]): Partitioned {
+  const scope: CaptureMatch[] = [];
+  const declaration: CaptureMatch[] = [];
+  const import_: CaptureMatch[] = [];
+  const typeBinding: CaptureMatch[] = [];
+  const reference: CaptureMatch[] = [];
+
+  for (const match of matches) {
+    const topic = topicOf(match);
+    switch (topic) {
+      case 'scope':
+        scope.push(match);
+        break;
+      case 'declaration':
+        declaration.push(match);
+        break;
+      case 'import':
+        import_.push(match);
+        break;
+      case 'type-binding':
+        typeBinding.push(match);
+        break;
+      case 'reference':
+        reference.push(match);
+        break;
+      case 'unknown':
+        // Unrecognized anchor — silently skip. Providers may emit extra
+        // captures (e.g., `@comment`) that the extractor has no topic for.
+        break;
+    }
+  }
+
+  return { scope, declaration, import_, typeBinding, reference };
+}
+
+type Topic = 'scope' | 'declaration' | 'import' | 'type-binding' | 'reference' | 'unknown';
+
+function topicOf(match: CaptureMatch): Topic {
+  // The anchor is the capture whose name uses one of the known topic
+  // prefixes. For multi-capture matches, ALL captures share the topic;
+  // we pick the first matching key for efficiency.
+  for (const name of Object.keys(match)) {
+    if (name.startsWith('@scope.')) return 'scope';
+    if (name.startsWith('@declaration.')) return 'declaration';
+    if (name.startsWith('@import.')) return 'import';
+    if (name.startsWith('@type-binding.')) return 'type-binding';
+    if (name.startsWith('@reference.')) return 'reference';
+  }
+  return 'unknown';
+}
+
+// ─── Internal: Scope draft model ───────────────────────────────────────────
+
+/**
+ * Mutable Scope record used during extraction. The final `Scope` (readonly,
+ * returned in `ParsedFile.scopes`) is produced by `draftToScope` at the end
+ * of each pass's writes.
+ */
+interface ScopeDraft {
+  readonly id: ScopeId;
+  readonly parent: ScopeId | null;
+  readonly kind: ScopeKind;
+  readonly range: Range;
+  readonly filePath: string;
+  readonly bindings: Map<string, BindingRef[]>;
+  readonly ownedDefs: SymbolDefinition[];
+  readonly imports: ImportEdge[];
+  readonly typeBindings: Map<string, TypeRef>;
+}
+
+function ensureModuleScope(
+  scopeDrafts: ScopeDraft[],
+  filePath: string,
+  allMatches: readonly CaptureMatch[],
+): ScopeDraft {
+  const moduleScope = scopeDrafts.find((s) => s.kind === 'Module');
+  if (moduleScope !== undefined) return moduleScope;
+
+  // Synthesize a Module scope spanning all captures in the file.
+  // Computed from ALL captures (scope, declaration, reference, etc.)
+  // so the range covers top-level references that appear after the
+  // last inner scope — not just inner Function/Class scopes.
+  let endLine = 0;
+  let endCol = 0;
+  for (const match of allMatches) {
+    for (const capture of Object.values(match)) {
+      if (
+        capture.range.endLine > endLine ||
+        (capture.range.endLine === endLine && capture.range.endCol > endCol)
+      ) {
+        endLine = capture.range.endLine;
+        endCol = capture.range.endCol;
+      }
+    }
+  }
+  const range: Range = { startLine: 0, startCol: 0, endLine, endCol };
+  const synthetic = makeDraft(
+    makeScopeId({ filePath, range, kind: 'Module' }),
+    null,
+    'Module',
+    range,
+    filePath,
+  );
+
+  scopeDrafts.push(synthetic);
+  return synthetic;
+}
+
+function draftToScope(draft: ScopeDraft): Scope {
+  const frozenBindings = new Map<string, readonly BindingRef[]>();
+  for (const [name, refs] of draft.bindings) {
+    frozenBindings.set(name, Object.freeze(refs.slice()));
+  }
+  return {
+    id: draft.id,
+    parent: draft.parent,
+    kind: draft.kind,
+    range: draft.range,
+    filePath: draft.filePath,
+    bindings: frozenBindings,
+    ownedDefs: Object.freeze(draft.ownedDefs.slice()),
+    imports: Object.freeze(draft.imports.slice()),
+    typeBindings: new Map(draft.typeBindings),
+  };
+}
+
+// ─── Pass 1: build scope tree ──────────────────────────────────────────────
+
+/**
+ * Convert `@scope.*` matches into `ScopeDraft[]`. Parent relationships
+ * are derived from range containment (outermost scope containing `range`
+ * becomes the parent).
+ */
+function pass1BuildScopes(
+  matches: readonly CaptureMatch[],
+  filePath: string,
+  provider: ScopeExtractorHooks,
+): ScopeDraft[] {
+  interface Candidate {
+    readonly match: CaptureMatch;
+    readonly range: Range;
+    readonly kind: ScopeKind;
+    readonly id: ScopeId;
+  }
+
+  const candidates: Candidate[] = [];
+  for (const match of matches) {
+    const anchor = anchorCaptureFor(match, '@scope.');
+    if (anchor === undefined) continue;
+    const kind = resolveKindForScopeMatch(match, anchor, provider);
+    if (kind === null) continue;
+    const id = makeScopeId({ filePath, range: anchor.range, kind });
+    candidates.push({ match, range: anchor.range, kind, id });
+  }
+
+  // Sort by (startLine, startCol) ASC, (endLine, endCol) DESC so outer
+  // scopes appear before their children for parent-resolution. When two
+  // candidates have exactly equal ranges (e.g. a `compilation_unit` and
+  // the only top-level scope in the file — see `canParentScope`), Module
+  // sorts first so it lands on the stack ahead of the candidate that will
+  // claim it as parent.
+  candidates.sort((a, b) => {
+    if (a.range.startLine !== b.range.startLine) return a.range.startLine - b.range.startLine;
+    if (a.range.startCol !== b.range.startCol) return a.range.startCol - b.range.startCol;
+    if (a.range.endLine !== b.range.endLine) return b.range.endLine - a.range.endLine;
+    if (a.range.endCol !== b.range.endCol) return b.range.endCol - a.range.endCol;
+    if (a.kind === b.kind) return 0;
+    if (a.kind === 'Module') return -1;
+    if (b.kind === 'Module') return 1;
+    return 0;
+  });
+
+  const drafts: ScopeDraft[] = [];
+  const stack: Candidate[] = []; // enclosing real scopes, outermost at [0]
+
+  for (const cand of candidates) {
+    // Pop the stack until the top can parent this candidate (strict
+    // containment, plus the equal-range Module carve-out).
+    while (
+      stack.length > 0 &&
+      !canParentScope(
+        stack[stack.length - 1]!.range,
+        cand.range,
+        stack[stack.length - 1]!.kind,
+        cand.kind,
+      )
+    ) {
+      stack.pop();
+    }
+
+    const parent = stack.length > 0 ? stack[stack.length - 1]!.id : null;
+    drafts.push(makeDraft(cand.id, parent, cand.kind, cand.range, filePath));
+    stack.push(cand);
+  }
+
+  return drafts;
+}
+
+function resolveKindForScopeMatch(
+  match: CaptureMatch,
+  anchor: { readonly name: string },
+  provider: ScopeExtractorHooks,
+): ScopeKind | null {
+  // Provider override takes precedence.
+  const override = provider.resolveScopeKind?.(match);
+  if (override !== undefined && override !== null) return override;
+
+  // Default: derive from capture name suffix (`@scope.function` → 'Function').
+  const suffix = anchor.name.slice('@scope.'.length);
+  switch (suffix.toLowerCase()) {
+    case 'module':
+      return 'Module';
+    case 'namespace':
+      return 'Namespace';
+    case 'class':
+      return 'Class';
+    case 'function':
+      return 'Function';
+    case 'block':
+      return 'Block';
+    case 'expression':
+      return 'Expression';
+    default:
+      return null;
+  }
+}
+
+function makeDraft(
+  id: ScopeId,
+  parent: ScopeId | null,
+  kind: ScopeKind,
+  range: Range,
+  filePath: string,
+): ScopeDraft {
+  return {
+    id,
+    parent,
+    kind,
+    range,
+    filePath,
+    bindings: new Map(),
+    ownedDefs: [],
+    imports: [],
+    typeBindings: new Map(),
+  };
+}
+
+// ─── Pass 2: attach declarations + local bindings ──────────────────────────
+
+function pass2AttachDeclarations(
+  matches: readonly CaptureMatch[],
+  drafts: readonly ScopeDraft[],
+  positionIndex: ReturnType<typeof buildPositionIndex>,
+  localDefs: SymbolDefinition[],
+  filePath: string,
+  provider: ScopeExtractorHooks,
+  scopeTree: ReturnType<typeof buildScopeTree>,
+): void {
+  const draftById = new Map<ScopeId, ScopeDraft>();
+  for (const d of drafts) draftById.set(d.id, d);
+
+  for (const match of matches) {
+    const anchor = anchorCaptureFor(match, '@declaration.');
+    if (anchor === undefined) continue;
+
+    const def = buildDefFromDeclarationMatch(match, anchor, filePath);
+    if (def === undefined) continue;
+
+    // Find the innermost scope that contains the declaration's anchor range.
+    const innermostId = positionIndex.atPosition(
+      filePath,
+      anchor.range.startLine,
+      anchor.range.startCol,
+    );
+    if (innermostId === undefined) continue;
+    const innermost = draftById.get(innermostId);
+    if (innermost === undefined) continue;
+
+    // Ownership: attach the def to the innermost scope's `ownedDefs` — that
+    // is the structural owner. `def.ownerId` is NOT populated here — the
+    // extractor has no clean path to the parent's own DefId mid-extraction
+    // (the parent declaration may not yet have been processed, or may live
+    // in a different scope entirely). Providers that need `ownerId` should
+    // set it directly from the declaration hook (e.g., derive from the
+    // `@declaration.owner` capture or the parent scope id); otherwise
+    // `finalize` populates method/field `ownerId` via `MethodDispatchIndex`
+    // (#914) in a follow-up pass that sees every def already in place.
+    innermost.ownedDefs.push(def);
+    localDefs.push(def);
+
+    // Binding visibility: default to innermost; allow hoisting via
+    // `provider.bindingScopeFor`. `draftToScope(innermost)` here is a
+    // **structural** snapshot — parent/range/kind only. Hooks MUST NOT
+    // rely on `scope.bindings`, `ownedDefs`, or `typeBindings` being
+    // populated during Pass 2: those fields are written across passes,
+    // so reading them mid-extraction yields a partial view. The
+    // `scopeTree` argument is similarly snapshot-before-mutation.
+    //
+    // Auto-hoist for scope-creating declarations: when the declaration's
+    // anchor range is the same node that produced `innermost` (e.g. a
+    // `function_definition` is both `@scope.function` and the
+    // `@declaration.function` anchor), the name is visible OUTSIDE the
+    // body, not inside. Hoisting to the parent scope is what every
+    // mainstream language wants for function/class declarations. Hooks
+    // can override by returning a non-null scope id.
+    const autoHostedId =
+      innermost.parent !== null && rangesEqual(anchor.range, innermost.range)
+        ? innermost.parent
+        : innermost.id;
+    const bindingScopeId =
+      provider.bindingScopeFor?.(match, draftToScope(innermost), scopeTree) ?? autoHostedId;
+    const bindingHost = draftById.get(bindingScopeId) ?? innermost;
+
+    const nameKey = deriveDeclarationName(match, def);
+    if (nameKey === undefined) continue;
+
+    const existing = bindingHost.bindings.get(nameKey) ?? [];
+    existing.push({ def, origin: 'local' });
+    bindingHost.bindings.set(nameKey, existing);
+  }
+}
+
+function buildDefFromDeclarationMatch(
+  match: CaptureMatch,
+  anchor: { readonly name: string; readonly range: Range; readonly text: string },
+  filePath: string,
+): SymbolDefinition | undefined {
+  // Anchor name pattern: `@declaration.<kind>` where <kind> maps to NodeLabel.
+  const kindStr = anchor.name.slice('@declaration.'.length);
+  const type = normalizeNodeLabel(kindStr);
+  if (type === undefined) return undefined;
+
+  const nameCap =
+    match['@declaration.name'] ?? match[`@declaration.${kindStr}.name`] ?? match[anchor.name];
+  if (nameCap === undefined) return undefined;
+
+  const qualifiedCap = match['@declaration.qualified_name'];
+  const qualifiedName = qualifiedCap?.text;
+  const templateArguments =
+    extractTemplateArguments(match['@declaration.template-arguments']?.text ?? '') ??
+    extractTemplateArguments(qualifiedName ?? nameCap.text);
+
+  // Optional arity metadata — producers (e.g. Python emit-captures)
+  // synthesize these on function/method declarations. Their absence is
+  // the normal case for other producers; readers treat undefined as
+  // "unknown" per `SymbolDefinition` contract.
+  const parameterCount = parseIntCapture(match['@declaration.parameter-count']);
+  const requiredParameterCount = parseIntCapture(match['@declaration.required-parameter-count']);
+  const parameterTypes = parseJsonStringArrayCapture(match['@declaration.parameter-types']);
+  const parameterTypeClasses = parseJsonParameterTypeClassesCapture(
+    match['@declaration.parameter-type-classes'],
+  );
+  const declaredType = match['@declaration.field-type']?.text;
+  const returnType = match['@declaration.return-type']?.text;
+  const templateConstraints = parseJsonCapture(match['@declaration.template-constraints']);
+  const isExplicit = parseBooleanCapture(match['@declaration.is-explicit']);
+  const isDeleted = parseBooleanCapture(match['@declaration.is-deleted']);
+
+  return {
+    nodeId: makeDefId(filePath, anchor.range, type, nameCap.text),
+    filePath,
+    type,
+    ...(qualifiedName !== undefined ? { qualifiedName } : { qualifiedName: nameCap.text }),
+    ...(parameterCount !== undefined ? { parameterCount } : {}),
+    ...(requiredParameterCount !== undefined ? { requiredParameterCount } : {}),
+    ...(parameterTypes !== undefined ? { parameterTypes } : {}),
+    ...(parameterTypeClasses !== undefined ? { parameterTypeClasses } : {}),
+    ...(declaredType !== undefined ? { declaredType } : {}),
+    ...(returnType !== undefined ? { returnType } : {}),
+    ...(templateArguments !== undefined ? { templateArguments } : {}),
+    ...(templateConstraints !== undefined ? { templateConstraints } : {}),
+    ...(isExplicit === true ? { isExplicit: true } : {}),
+    ...(isDeleted === true ? { isDeleted: true } : {}),
+  };
+}
+
+/** Parse an opaque JSON payload synthesized by per-language captures
+ *  (e.g. C++ `@declaration.template-constraints`). Producer owns the
+ *  shape; shared code threads it through as `unknown` per the
+ *  `SymbolDefinition.templateConstraints` contract. */
+function parseJsonCapture(cap: { readonly text: string } | undefined): unknown {
+  if (cap === undefined) return undefined;
+  try {
+    return JSON.parse(cap.text);
+  } catch {
+    return undefined;
+  }
+}
+
+function parseIntCapture(cap: { readonly text: string } | undefined): number | undefined {
+  if (cap === undefined) return undefined;
+  const n = Number.parseInt(cap.text, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function parseBooleanCapture(cap: { readonly text: string } | undefined): boolean | undefined {
+  if (cap === undefined) return undefined;
+  if (cap.text === 'true') return true;
+  if (cap.text === 'false') return false;
+  return undefined;
+}
+
+function parseJsonParameterTypeClassesCapture(
+  cap: { readonly text: string } | undefined,
+): ParameterTypeClass[] | undefined {
+  if (cap === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(cap.text);
+    if (!Array.isArray(parsed)) return undefined;
+    const out: ParameterTypeClass[] = [];
+    for (const item of parsed) {
+      if (item === null || typeof item !== 'object') return undefined;
+      const o = item as Record<string, unknown>;
+      if (typeof o.base !== 'string') return undefined;
+      if (
+        o.cv !== 'none' &&
+        o.cv !== 'const' &&
+        o.cv !== 'volatile' &&
+        o.cv !== 'const volatile' &&
+        o.cv !== 'unknown'
+      ) {
+        return undefined;
+      }
+      if (
+        o.indirection !== 'value' &&
+        o.indirection !== 'lvalue-ref' &&
+        o.indirection !== 'rvalue-ref' &&
+        o.indirection !== 'pointer' &&
+        o.indirection !== 'unknown'
+      ) {
+        return undefined;
+      }
+      if (typeof o.pointerDepth !== 'number' || !Number.isFinite(o.pointerDepth)) {
+        return undefined;
+      }
+      const shape: ParameterTypeClass = {
+        base: o.base,
+        cv: o.cv,
+        indirection: o.indirection,
+        pointerDepth: o.pointerDepth,
+      };
+      if (Array.isArray(o.templateArguments)) {
+        if (!o.templateArguments.every((x): x is string => typeof x === 'string')) {
+          return undefined;
+        }
+        shape.templateArguments = [...o.templateArguments];
+      }
+      out.push(shape);
+    }
+    return out;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseJsonStringArrayCapture(
+  cap: { readonly text: string } | undefined,
+): string[] | undefined {
+  if (cap === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(cap.text) as unknown;
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed.every((x): x is string => typeof x === 'string') ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function deriveDeclarationName(match: CaptureMatch, def: SymbolDefinition): string | undefined {
+  const nameCap =
+    match['@declaration.name'] ??
+    match[
+      Object.keys(match).find((k) => k.startsWith('@declaration.') && k.endsWith('.name')) ?? ''
+    ];
+  if (nameCap !== undefined) return nameCap.text;
+  // Fall back to qualifiedName tail.
+  const q = def.qualifiedName;
+  if (q !== undefined && q.length > 0) {
+    const dot = q.lastIndexOf('.');
+    return dot === -1 ? q : q.slice(dot + 1);
+  }
+  return undefined;
+}
+
+/**
+ * Map a lower-case declaration kind (from `@declaration.<kind>`) to a
+ * graph `NodeLabel`. Silently returns `undefined` for kinds we don't
+ * recognize — providers can emit richer captures without breaking the
+ * driver.
+ */
+function normalizeNodeLabel(kindStr: string): SymbolDefinition['type'] | undefined {
+  switch (kindStr.toLowerCase()) {
+    case 'class':
+      return 'Class';
+    case 'interface':
+      return 'Interface';
+    case 'enum':
+      return 'Enum';
+    case 'struct':
+      return 'Struct';
+    case 'union':
+      return 'Union';
+    case 'trait':
+      return 'Trait';
+    case 'method':
+      return 'Method';
+    case 'function':
+      return 'Function';
+    case 'constructor':
+      return 'Constructor';
+    case 'field':
+    case 'property':
+      return 'Property';
+    case 'variable':
+      return 'Variable';
+    // `const` / `let` declarations align with the legacy DAG parse phase,
+    // which emits `Const` graph nodes via `@definition.const` capture for
+    // `lexical_declaration`. Returning `'Const'` here lets resolveDefGraphId's
+    // qualified-key path succeed for value receivers without relying on the
+    // simple-key fallback (PR #1718 review Finding 1 / 2026-05-21-002 U4).
+    case 'const':
+      return 'Const';
+    case 'typealias':
+    case 'type_alias':
+      return 'TypeAlias';
+    case 'typedef':
+      return 'Typedef';
+    case 'record':
+      return 'Record';
+    case 'delegate':
+      return 'Delegate';
+    case 'annotation':
+      return 'Annotation';
+    case 'namespace':
+      return 'Namespace';
+    case 'macro':
+      return 'Macro';
+    default:
+      return undefined;
+  }
+}
+
+/** Function-like labels: callable defs that must keep incoming CALLS edges. */
+const NODE_BEARING_FUNCTION_LABELS: ReadonlySet<SymbolDefinition['type']> = new Set([
+  'Function',
+  'Method',
+  'Constructor',
+]);
+
+/** Value labels: non-callable bindings (a `const`/`let`/`var` holds a value). */
+const NODE_BEARING_VALUE_LABELS: ReadonlySet<SymbolDefinition['type']> = new Set([
+  'Const',
+  'Variable',
+]);
+
+/**
+ * Collapse rule for the deferred node-creation migration (#1876).
+ *
+ * When graph-node creation moves from the legacy DAG onto the
+ * registry-primary path, a single source binding can carry more than one
+ * `SymbolDefinition` for the same name in the same scope — e.g. a direct
+ * arrow `const fn = () => {}` is classified BOTH as a `Function` (the
+ * arrow) and a `Variable` (the binding). Emitting one graph node per def
+ * would reproduce exactly the duplicate-node bug this issue tracks.
+ *
+ * `selectNodeBearingDef` picks the ONE def that should bear the graph node
+ * for such a binding group:
+ *
+ *   1. a function-like def (`Function` / `Method` / `Constructor`) if any —
+ *      the binding is callable and must keep incoming `CALLS` edges;
+ *   2. otherwise a value def (`Const` / `Variable`) — the binding holds a
+ *      value (e.g. an array-method result after the U1/U2 narrowing);
+ *   3. otherwise the first def — deterministic fallback for label sets this
+ *      rule does not rank.
+ *
+ * INPUT CONTRACT: `group` must be the defs bound to ONE name within ONE
+ * scope (a binding group). It deliberately does NOT dedup by range —
+ * `SymbolDefinition` carries no range and `makeDefId` encodes only the
+ * start position, so containment is uncomputable here; the caller forms the
+ * group (e.g. from a scope's `ownedDefs` keyed by name) before calling.
+ *
+ * Pure. No production call site yet — this dead export is intentional and
+ * tracked by #1876 (the deferred node-creation migration); it is the
+ * executable contract that follow-up will consume, pinned today by the
+ * scope-extractor unit test.
+ */
+export function selectNodeBearingDef(
+  group: readonly SymbolDefinition[],
+): SymbolDefinition | undefined {
+  if (group.length === 0) return undefined;
+  const functionLike = group.find((def) => NODE_BEARING_FUNCTION_LABELS.has(def.type));
+  if (functionLike !== undefined) return functionLike;
+  const value = group.find((def) => NODE_BEARING_VALUE_LABELS.has(def.type));
+  if (value !== undefined) return value;
+  return group[0];
+}
+
+function makeDefId(
+  filePath: string,
+  range: Range,
+  type: SymbolDefinition['type'],
+  name: string,
+): string {
+  return `def:${filePath}#${range.startLine}:${range.startCol}:${type}:${name}`;
+}
+
+// ─── Pass 3: collect raw imports ───────────────────────────────────────────
+
+function pass3CollectImports(
+  matches: readonly CaptureMatch[],
+  parsedImports: ParsedImport[],
+  provider: ScopeExtractorHooks,
+): void {
+  if (provider.interpretImport === undefined) return;
+  for (const match of matches) {
+    const anchor = anchorCaptureFor(match, '@import.');
+    if (anchor === undefined) continue;
+    const parsed = provider.interpretImport(match);
+    if (parsed === null) continue;
+    parsedImports.push(parsed);
+  }
+}
+
+// ─── Pass 4: collect type bindings ─────────────────────────────────────────
+
+function pass4CollectTypeBindings(
+  matches: readonly CaptureMatch[],
+  drafts: readonly ScopeDraft[],
+  positionIndex: ReturnType<typeof buildPositionIndex>,
+  filePath: string,
+  provider: ScopeExtractorHooks,
+  scopeTree: ReturnType<typeof buildScopeTree>,
+): void {
+  const draftById = new Map<ScopeId, ScopeDraft>();
+  for (const d of drafts) draftById.set(d.id, d);
+
+  for (const match of matches) {
+    const anchor = anchorCaptureFor(match, '@type-binding.');
+    if (anchor === undefined) continue;
+
+    const parsed = provider.interpretTypeBinding?.(match);
+    if (parsed === null || parsed === undefined) continue;
+
+    const innermostId = positionIndex.atPosition(
+      filePath,
+      anchor.range.startLine,
+      anchor.range.startCol,
+    );
+    if (innermostId === undefined) continue;
+    const innermost = draftById.get(innermostId);
+    if (innermost === undefined) continue;
+
+    // Auto-hoist for scope-creating type bindings (e.g. Python's
+    // `@type-binding.return` whose anchor is the function_definition
+    // itself). Same condition as Pass 2 — when the anchor coincides
+    // with the innermost scope's range, the binding belongs in the
+    // enclosing scope (callers, not the function body, look up the
+    // return type by the function's name).
+    const autoHostedId =
+      innermost.parent !== null && rangesEqual(anchor.range, innermost.range)
+        ? innermost.parent
+        : innermost.id;
+    // `bindingScopeFor` may hoist the type binding to an outer scope.
+    const hostId =
+      provider.bindingScopeFor?.(match, draftToScope(innermost), scopeTree) ?? autoHostedId;
+    const host = draftById.get(hostId) ?? innermost;
+
+    const typeRef: TypeRef = {
+      rawName: parsed.rawTypeName,
+      declaredAtScope: host.id,
+      source: parsed.source,
+    };
+    // Prefer stronger sources when multiple matches fire for the same
+    // bound name in the same scope. Example: `u: User = find()` matches
+    // both the annotation and constructor-inferred patterns; the explicit
+    // annotation (stronger source) must win over the call-site guess
+    // regardless of query-match arrival order.
+    const existing = host.typeBindings.get(parsed.boundName);
+    if (
+      existing === undefined ||
+      typeBindingStrength(typeRef.source) >= typeBindingStrength(existing.source)
+    ) {
+      host.typeBindings.set(parsed.boundName, typeRef);
+    }
+  }
+
+  // ── Transitive closure over identifier-chain type bindings ─────────
+  // Captures like `(assignment left: (ident) right: (ident))` emit a
+  // TypeRef whose `rawName` is the RHS identifier. When the RHS name is
+  // itself a bound variable with a known type in the same scope (or a
+  // parent scope), follow the chain so `alias` ultimately points at the
+  // class type — not at another local variable name. Without this,
+  // `resolveTypeRef` hits the chained name, sees it's a local Variable
+  // (non-type kind), and strict-returns null.
+  for (const draft of drafts) {
+    for (const [name, ref] of draft.typeBindings) {
+      const resolved = followChainedRef(ref, draftById);
+      if (resolved !== ref) draft.typeBindings.set(name, resolved);
+    }
+  }
+}
+
+/** Max chain depth: practical programs rarely exceed 4-5 re-bindings;
+ *  the cap just prevents runaway loops when providers emit cycles. */
+const CHAIN_MAX_DEPTH = 16;
+
+/**
+ * Follow an identifier-chain TypeRef through successive typeBindings
+ * lookups in the declaring scope and its ancestors. Returns the terminal
+ * TypeRef (or the original if the chain dead-ends or cycles).
+ */
+function followChainedRef(start: TypeRef, draftById: ReadonlyMap<ScopeId, ScopeDraft>): TypeRef {
+  let current = start;
+  const visited = new Set<string>();
+  for (let depth = 0; depth < CHAIN_MAX_DEPTH; depth++) {
+    // A rawName containing a dot (`models.User`) goes through
+    // `QualifiedNameIndex` at resolution time — don't follow it here.
+    if (current.rawName.includes('.')) return current;
+
+    // Look up the current rawName in the declaring scope and walk up
+    // the chain until we hit a scope that has a binding for it.
+    let scopeId: ScopeId | null = current.declaredAtScope;
+    let next: TypeRef | undefined;
+    while (scopeId !== null) {
+      const scope = draftById.get(scopeId);
+      if (scope === undefined) break;
+      next = scope.typeBindings.get(current.rawName);
+      if (next !== undefined) break;
+      scopeId = scope.parent;
+    }
+
+    if (next === undefined) return current; // dead end — nothing to chain to
+    if (next === current) return current; // self-ref
+    if (visited.has(next.rawName)) return current; // cycle guard
+    visited.add(next.rawName);
+    current = next;
+  }
+  return current;
+}
+
+/**
+ * Priority ordering when multiple `TypeRef`s compete for the same bound
+ * name in the same scope. Higher number wins; ties keep the later match
+ * (last-write-wins preserves historical order within a tier).
+ *
+ * Rationale: explicit annotations always beat inferred ones because they
+ * reflect user intent. `self`/`cls` are treated as strongly as annotations
+ * because they are language-required receiver types.
+ */
+function typeBindingStrength(source: TypeRef['source']): number {
+  switch (source) {
+    case 'annotation':
+    case 'parameter-annotation':
+    case 'return-annotation':
+    case 'self':
+      return 2;
+    case 'assignment-inferred':
+    case 'constructor-inferred':
+    case 'receiver-propagated':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+// ─── Pass 5: collect reference sites ───────────────────────────────────────
+
+function pass5CollectReferences(
+  matches: readonly CaptureMatch[],
+  positionIndex: ReturnType<typeof buildPositionIndex>,
+  filePath: string,
+  referenceSites: ReferenceSite[],
+  provider: ScopeExtractorHooks,
+  scopeTree: ReturnType<typeof buildScopeTree>,
+): void {
+  for (const match of matches) {
+    const anchor = anchorCaptureFor(match, '@reference.');
+    if (anchor === undefined) continue;
+
+    const kind = referenceKindFromAnchor(anchor.name);
+    if (kind === undefined) continue;
+
+    const nameCap = match['@reference.name'] ?? anchor;
+    // Optional qualified form of the reference (e.g. a C++ base `Other::Inner`),
+    // threaded to resolution so a same-tail nested base resolves to the correct
+    // sibling via the full-path QualifiedNameIndex before the simple-tail walk
+    // (#1982). Absent for unqualified references — resolution stays unchanged.
+    const qualifiedCap = match['@reference.qualified-name'];
+    const inScopeId = positionIndex.atPosition(
+      filePath,
+      anchor.range.startLine,
+      anchor.range.startCol,
+    );
+    if (inScopeId === undefined) continue;
+
+    const callForm =
+      kind === 'call'
+        ? classifyCallFormForMatch(match, anchor.name, provider, scopeTree, inScopeId)
+        : undefined;
+    const explicitReceiver = extractExplicitReceiver(match);
+    const arity = extractArity(match);
+    const argumentTypes = extractArgumentTypes(match);
+    const argumentTypeClasses = parseJsonParameterTypeClassesCapture(
+      match['@reference.parameter-type-classes'],
+    );
+
+    const site: ReferenceSite = {
+      name: nameCap.text,
+      atRange: anchor.range,
+      inScope: inScopeId,
+      kind,
+      ...(qualifiedCap?.text !== undefined && qualifiedCap.text.length > 0
+        ? { rawQualifiedName: qualifiedCap.text }
+        : {}),
+      ...(callForm !== undefined ? { callForm } : {}),
+      ...(explicitReceiver !== undefined ? { explicitReceiver } : {}),
+      ...(arity !== undefined ? { arity } : {}),
+      ...(argumentTypes !== undefined ? { argumentTypes } : {}),
+      ...(argumentTypeClasses !== undefined ? { argumentTypeClasses } : {}),
+    };
+    referenceSites.push(site);
+  }
+}
+
+function referenceKindFromAnchor(name: string): ReferenceKind | undefined {
+  const suffix = name.slice('@reference.'.length);
+  // Strip sub-tag after the kind (`@reference.call.member` → `call`).
+  const firstDot = suffix.indexOf('.');
+  const head = firstDot === -1 ? suffix : suffix.slice(0, firstDot);
+  switch (head.toLowerCase()) {
+    case 'call':
+      return 'call';
+    case 'read':
+      return 'read';
+    case 'write':
+      return 'write';
+    case 'type':
+    case 'type_reference':
+      return 'type-reference';
+    case 'inherits':
+      return 'inherits';
+    case 'import_use':
+    case 'import-use':
+      return 'import-use';
+    case 'macro':
+      return 'macro';
+    default:
+      return undefined;
+  }
+}
+
+function classifyCallFormForMatch(
+  match: CaptureMatch,
+  anchorName: string,
+  provider: ScopeExtractorHooks,
+  scopeTree: ReturnType<typeof buildScopeTree>,
+  inScopeId: ScopeId,
+): 'free' | 'member' | 'constructor' | 'index' {
+  // Declarative sub-tag path first: `@reference.call.member` → 'member'.
+  const suffix = anchorName.slice('@reference.call.'.length);
+  switch (suffix.toLowerCase()) {
+    case 'free':
+      return 'free';
+    case 'member':
+      return 'member';
+    case 'constructor':
+      return 'constructor';
+    case 'index':
+      return 'index';
+  }
+
+  // Hook-based path: provider knows.
+  const hook = provider.classifyCallForm;
+  if (hook !== undefined) {
+    const scope = scopeTree.getScope(inScopeId);
+    if (scope !== undefined) return hook(match, scope);
+  }
+
+  return 'free';
+}
+
+function extractExplicitReceiver(match: CaptureMatch): { readonly name: string } | undefined {
+  const cap = match['@reference.receiver'];
+  if (cap === undefined) return undefined;
+  return { name: cap.text };
+}
+
+function extractArity(match: CaptureMatch): number | undefined {
+  const cap = match['@reference.arity'];
+  if (cap === undefined) return undefined;
+  const n = Number.parseInt(cap.text, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function extractArgumentTypes(match: CaptureMatch): readonly string[] | undefined {
+  const cap = match['@reference.parameter-types'];
+  if (cap === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(cap.text);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === 'string')) return parsed;
+  } catch {
+    /* malformed — fall through */
+  }
+  return undefined;
+}
+
+// ─── Internal: range + capture utilities ───────────────────────────────────
+
+function rangesEqual(a: Range, b: Range): boolean {
+  return (
+    a.startLine === b.startLine &&
+    a.startCol === b.startCol &&
+    a.endLine === b.endLine &&
+    a.endCol === b.endCol
+  );
+}
+
+/**
+ * Capture names that are never anchors — they are sub-tags nested inside a
+ * larger anchor (e.g., the receiver expression inside a `@reference.call`
+ * may span more source than the called name, but is not the call itself).
+ *
+ * The list is maintained here centrally rather than per-pass because the
+ * set is small and stable; adding a new sub-tag convention is a one-line
+ * change.
+ */
+const KNOWN_SUB_TAGS: ReadonlySet<string> = new Set<string>([
+  '@declaration.name',
+  '@declaration.qualified_name',
+  '@import.name',
+  '@import.source',
+  '@import.alias',
+  '@type-binding.name',
+  '@type-binding.type',
+  '@reference.name',
+  '@reference.qualified-name',
+  '@reference.receiver',
+  '@reference.operator',
+  '@reference.arity',
+  '@reference.parameter-types',
+  '@reference.parameter-type-classes',
+  '@declaration.parameter-count',
+  '@declaration.required-parameter-count',
+  '@declaration.parameter-types',
+  '@declaration.parameter-type-classes',
+  '@declaration.return-type',
+  '@declaration.template-constraints',
+  '@declaration.is-explicit',
+  '@declaration.is-deleted',
+]);
+
+/**
+ * Return the anchor capture for a match — the one whose name begins with
+ * `prefix` AND is not in the known-sub-tag set. When multiple candidates
+ * remain, the broadest-ranged one wins: tree-sitter queries often tag
+ * both a whole statement and a sub-token under the same topic
+ * (`@scope.function` + `@scope.function.name`); the anchor is the
+ * statement-level one.
+ */
+function anchorCaptureFor(
+  match: CaptureMatch,
+  prefix: string,
+): { readonly name: string; readonly range: Range; readonly text: string } | undefined {
+  let best: { readonly name: string; readonly range: Range; readonly text: string } | undefined;
+  let bestSpan = -1;
+  for (const name of Object.keys(match)) {
+    if (!name.startsWith(prefix)) continue;
+    if (KNOWN_SUB_TAGS.has(name)) continue;
+    const cap = match[name]!;
+    const span =
+      (cap.range.endLine - cap.range.startLine) * 1_000_000 +
+      (cap.range.endCol - cap.range.startCol);
+    if (span > bestSpan) {
+      bestSpan = span;
+      best = cap;
+    }
+  }
+  return best;
+}

@@ -1,8 +1,0 @@
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.orchestrator/runs/
-.env
-*.egg-info/
-dist/
-build/

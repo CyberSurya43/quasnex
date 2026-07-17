@@ -12,26 +12,40 @@ import tomllib
 # Environment Configuration
 # -----------------------------------------------------------------------
 
+_DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+_DEFAULT_NVIDIA_MODELS = (
+    "qwen/qwen3-next-80b-a3b-instruct",
+    "openai/gpt-oss-20b",
+    "mistralai/codestral-22b-instruct-v0.1",
+    "deepseek-ai/deepseek-coder-6.7b-instruct",
+)
+_DEFAULT_TEMPERATURE = 0.2
+_DEFAULT_MAX_RETRIES = 2
+
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    """A single OpenAI-compatible model provider (Lightning gateway, NVIDIA NIM, ...)."""
+    name: str
+    base_url: str
+    api_key: str
+    models: tuple[str, ...]
+    temperature: float = _DEFAULT_TEMPERATURE
+    max_retries: int = _DEFAULT_MAX_RETRIES
+
+
 @dataclass
 class EnvironmentConfig:
-    """Configuration loaded from .env file for CLI agent settings.
-
-    API keys are NOT managed here — each CLI tool (codex, claude, ollama)
-    handles its own authentication.
-    """
-    ollama_model: str = "qwen2.5-coder"
-    codex_approval_mode: str = "full-auto"
-    claude_model: str | None = None
+    """Configuration loaded from .env file for model access."""
+    default_provider: str = "lightning"
+    providers: dict[str, ProviderConfig] = field(default_factory=dict)
 
 
-def load_env(project_dir: Path) -> EnvironmentConfig:
-    """Load environment configuration from .env file in project directory."""
-    env_path = project_dir / ".env"
-    
-    if not env_path.exists():
-        return EnvironmentConfig()
-    
+def _read_env_file(project_dir: Path) -> dict[str, str]:
     env_vars: dict[str, str] = {}
+    env_path = project_dir / ".env"
+    if not env_path.exists():
+        return env_vars
     for line in env_path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -39,12 +53,82 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
         if "=" in line:
             key, _, value = line.partition("=")
             env_vars[key.strip()] = value.strip()
-    
-    return EnvironmentConfig(
-        ollama_model=env_vars.get("OLLAMA_MODEL", "qwen2.5-coder"),
-        codex_approval_mode=env_vars.get("CODEX_APPROVAL_MODE", "full-auto"),
-        claude_model=env_vars.get("CLAUDE_MODEL") or None,
-    )
+    return env_vars
+
+
+def _get(env_vars: dict[str, str], name: str, default: str | None = None) -> str | None:
+    """Env file value wins, falling back to the process environment, then default."""
+    return env_vars.get(name) or os.getenv(name) or default
+
+
+def _get_float(env_vars: dict[str, str], name: str, default: float) -> float:
+    raw = _get(env_vars, name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _get_int(env_vars: dict[str, str], name: str, default: int) -> int:
+    raw = _get(env_vars, name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def load_env(project_dir: Path) -> EnvironmentConfig:
+    """Load model-provider configuration from a .env file in project_dir (or cwd)."""
+    env_vars = _read_env_file(project_dir)
+
+    providers: dict[str, ProviderConfig] = {}
+
+    # Global fallback, overridable per-provider (e.g. LIGHTNING_TEMPERATURE wins
+    # over DEFAULT_TEMPERATURE for the lightning provider specifically).
+    default_temperature = _get_float(env_vars, "DEFAULT_TEMPERATURE", _DEFAULT_TEMPERATURE)
+    default_max_retries = _get_int(env_vars, "DEFAULT_MAX_RETRIES", _DEFAULT_MAX_RETRIES)
+
+    lightning_key = _get(env_vars, "LIGHTNING_API_KEY")
+    lightning_url = _get(env_vars, "LIGHTNING_BASE_URL")
+    if lightning_url and lightning_key:
+        models = tuple(
+            m.strip() for m in _get(env_vars, "LIGHTNING_MODELS", "").split(",") if m.strip()
+        )
+        providers["lightning"] = ProviderConfig(
+            name="lightning",
+            base_url=lightning_url,
+            api_key=lightning_key,
+            models=models or ("qwen2.5-coder:14b",),
+            temperature=_get_float(env_vars, "LIGHTNING_TEMPERATURE", default_temperature),
+            max_retries=_get_int(env_vars, "LIGHTNING_MAX_RETRIES", default_max_retries),
+        )
+
+    nvidia_key = _get(env_vars, "NVIDIA_API_KEY")
+    if nvidia_key:
+        models = tuple(
+            m.strip() for m in _get(env_vars, "NVIDIA_MODELS", "").split(",") if m.strip()
+        )
+        providers["nvidia"] = ProviderConfig(
+            name="nvidia",
+            base_url=_get(env_vars, "NVIDIA_BASE_URL", _DEFAULT_NVIDIA_BASE_URL),
+            api_key=nvidia_key,
+            models=models or _DEFAULT_NVIDIA_MODELS,
+            temperature=_get_float(env_vars, "NVIDIA_TEMPERATURE", default_temperature),
+            max_retries=_get_int(env_vars, "NVIDIA_MAX_RETRIES", default_max_retries),
+        )
+
+    default_provider = _get(env_vars, "DEFAULT_PROVIDER", next(iter(providers), "lightning"))
+
+    return EnvironmentConfig(default_provider=default_provider, providers=providers)
+
+
+def load_providers(project_dir: Path) -> dict[str, ProviderConfig]:
+    """Convenience accessor: just the configured providers."""
+    return load_env(project_dir).providers
 
 
 def get_env_var(name: str, default: str | None = None) -> str | None:
@@ -57,18 +141,16 @@ def get_env_var(name: str, default: str | None = None) -> str | None:
 # -----------------------------------------------------------------------
 
 @dataclass(frozen=True)
-class FallbackConfig:
-    """Ordered list of models to try for an agent. First one that succeeds wins."""
-    models: tuple[str, ...]        # e.g. ("gemini", "qwen_local")
-    commands: dict[str, str]       # model_key -> command template
-
-
-@dataclass(frozen=True)
 class AgentConfig:
+    """A persona the LangGraph agent adopts for a stage.
+
+    No shell command templates anymore — the same tool-using agent executes
+    every stage, just with a different system-prompt persona and (optionally)
+    a preferred model provider.
+    """
     name: str
     role: str
-    command: str                   # primary command (kept for compatibility)
-    fallback: FallbackConfig | None = field(default=None, compare=False)
+    provider: str | None = None    # preferred provider key, e.g. "lightning"; None = use active
 
 
 @dataclass(frozen=True)
@@ -99,7 +181,6 @@ def load_config(project_dir: Path) -> ProjectConfig:
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     project = data.get("project", {})
     agents_data = data.get("agents", {})
-    fallbacks_data = data.get("fallbacks", {})
     stages_data = data.get("stages", [])
 
     if not project.get("name"):
@@ -109,19 +190,10 @@ def load_config(project_dir: Path) -> ProjectConfig:
 
     agents: dict[str, AgentConfig] = {}
     for key, value in agents_data.items():
-        fb_key = value.get("fallback_group")
-        fallback: FallbackConfig | None = None
-        if fb_key and fb_key in fallbacks_data:
-            fb_data = fallbacks_data[fb_key]
-            fallback = FallbackConfig(
-                models=tuple(fb_data.get("models", [])),
-                commands={k: v for k, v in fb_data.get("commands", {}).items()},
-            )
         agents[key] = AgentConfig(
             name=value.get("name", key),
             role=value.get("role", ""),
-            command=value.get("command", ""),
-            fallback=fallback,
+            provider=value.get("provider") or None,
         )
 
     if not agents:

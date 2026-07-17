@@ -1,0 +1,125 @@
+{
+  "name": "gitnexus",
+  "version": "1.6.9",
+  "description": "Graph-powered code intelligence for AI agents. Index any codebase, query via MCP or CLI.",
+  "author": "Abhigyan Patwari",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "homepage": "https://github.com/abhigyanpatwari/GitNexus#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/abhigyanpatwari/GitNexus.git",
+    "directory": "gitnexus"
+  },
+  "bugs": {
+    "url": "https://github.com/abhigyanpatwari/GitNexus/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "code-intelligence",
+    "knowledge-graph",
+    "cursor",
+    "claude",
+    "codex",
+    "ai-agent",
+    "gitnexus",
+    "static-analysis",
+    "codebase-indexing"
+  ],
+  "type": "module",
+  "bin": {
+    "gitnexus": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "hooks",
+    "scripts",
+    "skills",
+    "vendor",
+    "web"
+  ],
+  "scripts": {
+    "build": "node scripts/build.js",
+    "serve": "tsx src/cli/index.ts serve",
+    "dev": "tsx watch src/cli/index.ts",
+    "test": "vitest run",
+    "test:unit": "vitest run test/unit",
+    "pretest:integration": "node scripts/build.js",
+    "test:integration": "vitest run test/integration",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:cross-platform": "tsx scripts/run-cross-platform.ts",
+    "postinstall": "node scripts/build-tree-sitter-grammars.cjs",
+    "assert-publish-coverage": "node scripts/assert-publish-grammar-coverage.cjs",
+    "prepare": "node scripts/build.js",
+    "prepack": "node scripts/assert-publish-grammar-coverage.cjs && node scripts/build.js",
+    "version": "node scripts/sync-plugin-manifests.mjs"
+  },
+  "dependencies": {
+    "@ladybugdb/core": "^0.18.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@scarf/scarf": "^1.4.0",
+    "busboy": "^1.6.0",
+    "cli-progress": "^3.12.0",
+    "commander": "^15.0.0",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.4.1",
+    "glob": "^13.0.6",
+    "graphology": "^0.26.0",
+    "graphology-indices": "^0.17.0",
+    "graphology-utils": "^2.3.0",
+    "ignore": "^7.0.5",
+    "js-yaml": "^4.1.1",
+    "jsonc-parser": "^3.3.1",
+    "mnemonist": "^0.40.3",
+    "node-addon-api": "^8.0.0",
+    "node-gyp-build": "^4.8.0",
+    "onnxruntime-common": "^1.26.0",
+    "pandemonium": "^2.4.0",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3",
+    "tree-sitter": "0.21.1",
+    "tree-sitter-c-sharp": "0.23.1",
+    "tree-sitter-cpp": "0.23.2",
+    "tree-sitter-go": "^0.23.0",
+    "tree-sitter-java": "^0.23.5",
+    "tree-sitter-javascript": "^0.23.0",
+    "tree-sitter-php": "^0.23.0",
+    "tree-sitter-python": "0.23.4",
+    "tree-sitter-ruby": "^0.23.1",
+    "tree-sitter-rust": "0.23.1",
+    "tree-sitter-typescript": "^0.23.2",
+    "uuid": "^14.0.0"
+  },
+  "optionalDependencies": {
+    "@huggingface/transformers": "^4.1.0",
+    "onnxruntime-node": "^1.24.0"
+  },
+  "devDependencies": {
+    "@babel/generator": "^8.0.0",
+    "@babel/parser": "^8.0.0",
+    "@babel/traverse": "^8.0.0",
+    "@babel/types": "^8.0.0",
+    "@types/busboy": "^1.5.4",
+    "@types/cli-progress": "^3.11.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.6",
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25.6.0",
+    "@types/uuid": "^11.0.0",
+    "@vitest/coverage-v8": "^4.0.18",
+    "gitnexus-shared": "file:../gitnexus-shared",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.5",
+    "vitest": "^4.0.18"
+  },
+  "overrides": {
+    "@huggingface/transformers": {
+      "onnxruntime-node": "$onnxruntime-node"
+    }
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

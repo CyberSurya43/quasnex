@@ -1,153 +1,88 @@
-# ✅ AI Orchestrator - Fully Portable & Ready
+# AI Orchestrator
 
-## 🎯 Quick Start
+A CLI coding agent for planning, building, testing, and deploying apps —
+powered by your own hosted models instead of third-party CLI tools.
 
-The **`ai_orchestrator/`** folder contains everything you need. Just copy it anywhere!
+## Architecture
+
+- **Model access** — [LangChain](https://python.langchain.com) (`langchain-openai`) talks
+  directly to any OpenAI-compatible endpoint. Configure providers in `.env`:
+  - `lightning` — a self-hosted gateway (e.g. a Lightning AI GPU instance running vLLM/Ollama
+    behind an OpenAI-compatible proxy)
+  - `nvidia` — NVIDIA's NIM API (hosted open-source models)
+
+  Calls retry transient failures automatically; if the active provider errors out mid-chat,
+  the session falls back to the other configured provider and keeps going.
+- **Agent loop** — [LangGraph](https://langchain-ai.github.io/langgraph/)'s `create_react_agent`
+  runs a tool-using loop with SQLite-backed conversation state (`.orchestrator/chat_state.sqlite`),
+  so context persists across chat sessions per project.
+- **Runtime model switching** — use `/model <provider> [model]` inside the chat REPL to switch
+  models mid-conversation without losing context.
+- **Knowledge graph + context resolver** — the project is indexed into
+  `.orchestrator/knowledge_graph.json` (files, functions/classes, import relationships),
+  incrementally so re-indexing only re-parses changed files. Given a bug report or feature
+  description, `resolve_issue(...)` scores the graph and points the agent at the most likely
+  files/symbols *before* it starts exploring blind — essential for working in an existing,
+  unfamiliar codebase. Auto-built at the start of every chat session and refreshed on every
+  `plan` run, so it stays in sync as the code changes.
+- **Skills** — step-by-step methodologies for `plan`/`build`/`test`/`deploy`/`debug`
+  (`ai_orchestrator/skills/*.md`), pulled into context on demand via the `load_skill_instructions`
+  tool, the matching `/plan` `/build` `/test` `/deploy` `/debug` slash commands, or automatically
+  attached to each pipeline stage based on its name.
+- **Tools** — see the full list below. File writes, edits, deletes, and shell commands always
+  require interactive confirmation; reads, search, and knowledge-graph tools do not.
+- **Memory** — `remember`/`recall` tools persist facts/decisions across sessions via
+  `.orchestrator/context.json`, independent of any single conversation's history.
+
+### Tools available to the agent
+
+| Category | Tools |
+| --- | --- |
+| Filesystem | `read_file`, `list_dir`, `project_tree`, `glob_files`, `search_code`, `write_file`, `edit_file`, `delete_file` |
+| Shell | `run_shell`, `run_tests` (auto-detects pytest/Django/npm/go/cargo), `git_status`, `git_diff` |
+| Knowledge gateway | `web_search`, `fetch_url` — so a small/open-weight model can pull current docs instead of relying on stale training data |
+| Knowledge graph | `build_knowledge_graph`, `resolve_issue`, `kg_stats` |
+| Memory | `remember`, `recall` |
+| Skills | `load_skill_instructions` |
+| Scaffolding | `scaffold_project` |
+
+## Quick Start
 
 ```bash
-# Copy the ai_orchestrator folder to any location
-cp -r ai_orchestrator /path/to/anywhere/
+cd ai_orchestrator
+pip install -e .
 
-# Use it immediately
-cd /path/to/anywhere
-python3 -m ai_orchestrator chat
-python3 -m ai_orchestrator init ./my-app --name my-app
+# Copy your .env with LIGHTNING_*/NVIDIA_* credentials into the project root
+cp .env.example .env  # then fill in your keys
+
+python -m ai_orchestrator chat
 ```
 
-## 📦 What's in `ai_orchestrator/`
+## Commands
 
-- ✅ **14 Python modules** - Complete orchestration system
-- ✅ **Professional dev tools** - 5,821 chars (Codex), 4,140 chars (Gemini)
-- ✅ **Smart agent routing** - Codex/Gemini/Ollama with auto-fallback
-- ✅ **Templates & examples** - Web app template + task manager example
-- ✅ **Complete documentation** - 7 markdown files
-- ✅ **Test suite** - Architecture & professional guidelines tests
-- ✅ **Zero dependencies** - Uses only Python 3.11+ stdlib
-
-**Total size:** 352KB (49 files)
-
-## 🚀 Usage
-
-### Interactive Chat
 ```bash
-python3 -m ai_orchestrator chat
-# Orchestrator automatically routes to Gemini/Codex/Ollama
+python -m ai_orchestrator chat                          # interactive chat with the coding agent
+python -m ai_orchestrator init ./my-app --name my-app    # scaffold a new orchestration project
+python -m ai_orchestrator plan ./my-app                  # generate stage task packets + refresh the KG
+python -m ai_orchestrator run ./my-app --execute          # run the multi-stage build pipeline
+python -m ai_orchestrator context show ./my-app          # inspect shared project context
 ```
 
-### Full Orchestration
-```bash
-python3 -m ai_orchestrator init ./my-project --name my-project
-python3 -m ai_orchestrator plan ./my-project
-python3 -m ai_orchestrator run ./my-project --execute
-```
-
-## 🎓 Professional Standards Included
-
-Every agent follows senior developer best practices:
-
-- **Code Quality** - Clean code, DRY, SOLID principles
-- **Security** - 12-point checklist (input validation, no secrets, XSS/CSRF/SQL prevention)
-- **Testing** - 80%+ coverage, test pyramid, edge cases
-- **Deployment** - Docker, health checks, monitoring, rollback procedures
-
-## 📚 Documentation
-
-All documentation is inside `ai_orchestrator/`:
-
-- `README.md` - Main documentation
-- `QUICKSTART.md` - Quick start guide with examples
-- `INSTALL.md` - Installation and portability guide
-- `ARCHITECTURE.md` - System architecture details
-- `SENIOR_DEV_GUIDELINES.md` - Professional development standards
-- `PORTABILITY.md` - Portability verification
-
-## ✅ Verified & Tested
-
-All portability tests pass:
-- ✓ Copy to any location works
-- ✓ CLI commands work
-- ✓ Professional tools accessible
-- ✓ Agent system functional
-- ✓ Project creation works
-
-## 📦 Distribution Options
-
-### 1. Direct Copy
-```bash
-cp -r ai_orchestrator /destination/
-```
-
-### 2. Archive
-```bash
-tar -czf ai_orchestrator.tar.gz ai_orchestrator/
-# Share the archive
-```
-
-### 3. Python Package
-```bash
-pip install -e ai_orchestrator/
-ai-orchestrator chat
-```
-
-## 🔧 Requirements
-
-- **Python**: 3.11 or higher
-- **Ollama**: Optional (for local fallback)
-- **API Keys**: Optional (Gemini/Codex), Ollama works without
-
-## 📊 Architecture
+## Inside the chat REPL
 
 ```
-User Query → Orchestrator
-    ├─→ Frontend? → Gemini → (fails) → Ollama
-    └─→ Backend/Orchestrator/Testing/Deploy? → Codex → (fails) → Ollama
-
-All agents share context via .orchestrator/context.json
+/model                          show the active provider/model
+/model nvidia openai/gpt-oss-20b  switch provider + model
+/providers                      list all configured providers and their models
+/tools                          list tools available to the agent
+/skills                         list available skills
+/plan <task>                    work through <task> following the Plan skill
+/build <task>                   work through <task> following the Build skill
+/test [task]                    run/write tests following the Test skill
+/deploy [task]                  prepare a deployment following the Deploy skill
+/debug <task>                   investigate a bug following the Debug skill
+/kg                             show knowledge graph stats
+/kg rebuild                     force a full re-index of the project
+/clear                          start a fresh conversation thread
+/help                           show all commands
 ```
-
-## 🎁 What You Get
-
-### Agent Instructions
-- **Codex**: 5,821 characters of professional guidelines
-- **Gemini**: 4,140 characters of professional guidelines
-- **Ollama**: Automatic fallback with same standards
-
-### Checklists
-- **Security**: 12 items
-- **Testing**: 10 items
-- **Deployment**: 10 items
-- **Code Review**: 10 items
-
-### Features
-- Smart agent routing
-- Automatic fallback
-- Context sharing
-- Professional standards
-- Error handling
-- Environment config
-
-## 🚀 Ready to Use
-
-The `ai_orchestrator/` folder is production-ready:
-- ✅ Fully self-contained
-- ✅ Portable (copy anywhere)
-- ✅ Well-documented
-- ✅ Professionally tested
-- ✅ Zero external dependencies
-- ✅ Senior dev standards included
-
----
-
-## 🎯 Next Steps
-
-1. **Copy** the `ai_orchestrator/` folder to your desired location
-2. **Configure** API keys in `.env` (or use Ollama without keys)
-3. **Start** using: `python3 -m ai_orchestrator chat`
-
-That's it! 🚀
-
----
-
-**Everything you need is in the `ai_orchestrator/` folder!**
-
-For detailed documentation, see `ai_orchestrator/README.md`

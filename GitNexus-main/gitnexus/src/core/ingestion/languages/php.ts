@@ -1,0 +1,333 @@
+/**
+ * PHP language provider.
+ *
+ * PHP uses named imports (use statements for classes/functions/constants),
+ * and standard export/import resolution. PHP files can use a variety of
+ * extensions from legacy versions through modern PHP 8.
+ */
+import {
+  emitPhpScopeCaptures,
+  interpretPhpImport,
+  interpretPhpTypeBinding,
+  phpArityCompatibility,
+  phpMergeBindings,
+  resolvePhpImportTarget,
+  phpBindingScopeFor,
+  phpImportOwningScope,
+  phpReceiverBinding,
+} from './php/index.js';
+
+import { SupportedLanguages } from 'gitnexus-shared';
+import { createClassExtractor } from '../class-extractors/generic.js';
+import { phpClassConfig } from '../class-extractors/configs/php.js';
+import { createPhpCfgVisitor } from '../cfg/visitors/php.js';
+import {
+  defineLanguage,
+  type AstFrameworkPatternConfig,
+  type CaptureMap,
+} from '../language-provider.js';
+import { typeConfig as phpConfig } from '../type-extractors/php.js';
+import { phpExportChecker } from '../export-detection.js';
+import { createImportResolver } from '../import-resolvers/resolver-factory.js';
+import { phpImportConfig } from '../import-resolvers/configs/php.js';
+import { PHP_QUERIES } from '../tree-sitter-queries.js';
+import {
+  findDescendant,
+  extractStringContent,
+  createLeadingDocDescriptionExtractor,
+  type SyntaxNode,
+} from '../utils/ast-helpers.js';
+import type { NodeLabel } from 'gitnexus-shared';
+import { createFieldExtractor } from '../field-extractors/generic.js';
+import { phpConfig as phpFieldConfig } from '../field-extractors/configs/php.js';
+import { createMethodExtractor } from '../method-extractors/generic.js';
+import { phpMethodConfig } from '../method-extractors/configs/php.js';
+import { createVariableExtractor } from '../variable-extractors/generic.js';
+import { phpVariableConfig } from '../variable-extractors/configs/php.js';
+import { createCallExtractor } from '../call-extractors/generic.js';
+import { phpCallConfig } from '../call-extractors/configs/php.js';
+
+const BUILT_INS: ReadonlySet<string> = new Set([
+  'echo',
+  'isset',
+  'empty',
+  'unset',
+  'list',
+  'array',
+  'compact',
+  'extract',
+  'count',
+  'strlen',
+  'strpos',
+  'strrpos',
+  'substr',
+  'strtolower',
+  'strtoupper',
+  'trim',
+  'ltrim',
+  'rtrim',
+  'str_replace',
+  'str_contains',
+  'str_starts_with',
+  'str_ends_with',
+  'sprintf',
+  'vsprintf',
+  'printf',
+  'number_format',
+  'array_map',
+  'array_filter',
+  'array_reduce',
+  'array_push',
+  'array_pop',
+  'array_shift',
+  'array_unshift',
+  'array_slice',
+  'array_splice',
+  'array_merge',
+  'array_keys',
+  'array_values',
+  'array_key_exists',
+  'in_array',
+  'array_search',
+  'array_unique',
+  'usort',
+  'rsort',
+  'json_encode',
+  'json_decode',
+  'serialize',
+  'unserialize',
+  'intval',
+  'floatval',
+  'strval',
+  'boolval',
+  'is_null',
+  'is_string',
+  'is_int',
+  'is_array',
+  'is_object',
+  'is_numeric',
+  'is_bool',
+  'is_float',
+  'var_dump',
+  'print_r',
+  'var_export',
+  'date',
+  'time',
+  'strtotime',
+  'mktime',
+  'microtime',
+  'file_exists',
+  'file_get_contents',
+  'file_put_contents',
+  'is_file',
+  'is_dir',
+  'preg_match',
+  'preg_match_all',
+  'preg_replace',
+  'preg_split',
+  'header',
+  'session_start',
+  'session_destroy',
+  'ob_start',
+  'ob_end_clean',
+  'ob_get_clean',
+  'dd',
+  'dump',
+]);
+
+/** Eloquent model properties whose array values are worth indexing. */
+const ELOQUENT_ARRAY_PROPS = new Set(['fillable', 'casts', 'hidden', 'guarded', 'with', 'appends']);
+
+/** Eloquent relationship method names. */
+const ELOQUENT_RELATIONS = new Set([
+  'hasMany',
+  'hasOne',
+  'belongsTo',
+  'belongsToMany',
+  'morphTo',
+  'morphMany',
+  'morphOne',
+  'morphToMany',
+  'morphedByMany',
+  'hasManyThrough',
+  'hasOneThrough',
+]);
+
+/**
+ * For a PHP property_declaration node, extract array values as a description string.
+ * Returns null if not an Eloquent model property or no array values found.
+ */
+function extractPhpPropertyDescription(propName: string, propDeclNode: SyntaxNode): string | null {
+  if (!ELOQUENT_ARRAY_PROPS.has(propName)) return null;
+
+  const arrayNode = findDescendant(propDeclNode, 'array_creation_expression');
+  if (!arrayNode) return null;
+
+  const items: string[] = [];
+  for (const child of arrayNode.children ?? []) {
+    if (child.type !== 'array_element_initializer') continue;
+    const children = child.children ?? [];
+    const arrowIdx = children.findIndex((c: SyntaxNode) => c.type === '=>');
+    if (arrowIdx !== -1) {
+      const key = extractStringContent(children[arrowIdx - 1]);
+      const val = extractStringContent(children[arrowIdx + 1]);
+      if (key && val) items.push(`${key}:${val}`);
+    } else {
+      const val = extractStringContent(children[0]);
+      if (val) items.push(val);
+    }
+  }
+
+  return items.length > 0 ? items.join(', ') : null;
+}
+
+/**
+ * For a PHP method_declaration node, detect if it defines an Eloquent relationship.
+ * Returns description like "hasMany(Post)" or null.
+ */
+function extractEloquentRelationDescription(methodNode: SyntaxNode): string | null {
+  function findRelationCall(root: SyntaxNode): SyntaxNode | null {
+    const stack: SyntaxNode[] = [root];
+    while (stack.length > 0) {
+      const node = stack.pop()!;
+      if (node.type === 'member_call_expression') {
+        const children = node.children ?? [];
+        const objectNode = children.find(
+          (c: SyntaxNode) => c.type === 'variable_name' && c.text === '$this',
+        );
+        const nameNode = children.find((c: SyntaxNode) => c.type === 'name');
+        if (objectNode && nameNode && ELOQUENT_RELATIONS.has(nameNode.text)) return node;
+      }
+      const children = node.children ?? [];
+      for (let i = children.length - 1; i >= 0; i--) {
+        stack.push(children[i]);
+      }
+    }
+    return null;
+  }
+
+  const callNode = findRelationCall(methodNode);
+  if (!callNode) return null;
+
+  const relType = callNode.children?.find((c: SyntaxNode) => c.type === 'name')?.text;
+  const argsNode = callNode.children?.find((c: SyntaxNode) => c.type === 'arguments');
+  let targetModel: string | null = null;
+  if (argsNode) {
+    const firstArg = argsNode.children?.find((c: SyntaxNode) => c.type === 'argument');
+    if (firstArg) {
+      const classConstant = firstArg.children?.find(
+        (c: SyntaxNode) => c.type === 'class_constant_access_expression',
+      );
+      if (classConstant) {
+        targetModel =
+          classConstant.children?.find((c: SyntaxNode) => c.type === 'name')?.text ?? null;
+      }
+    }
+  }
+
+  if (relType && targetModel) return `${relType}(${targetModel})`;
+  if (relType) return relType;
+  return null;
+}
+
+/** PHPDoc-docblock fallback, shared with the other leading-comment languages. */
+const phpLeadingDocFallback = createLeadingDocDescriptionExtractor();
+
+/**
+ * LanguageProvider.descriptionExtractor implementation for PHP.
+ * Eloquent model property metadata and relationship descriptions take
+ * precedence (they are richer than prose); otherwise documentable symbols fall
+ * back to their leading PHPDoc docblock (issue #2270), mirroring the other
+ * leading-comment languages.
+ */
+function phpDescriptionExtractor(
+  nodeLabel: NodeLabel,
+  nodeName: string,
+  captureMap: CaptureMap,
+): string | undefined {
+  const propertyNode = captureMap['definition.property'];
+  if (nodeLabel === 'Property' && propertyNode) {
+    const eloquentProperty = extractPhpPropertyDescription(nodeName, propertyNode);
+    if (eloquentProperty) return eloquentProperty;
+  }
+  const methodNode = captureMap['definition.method'];
+  if (nodeLabel === 'Method' && methodNode) {
+    const eloquentRelation = extractEloquentRelationDescription(methodNode);
+    if (eloquentRelation) return eloquentRelation;
+  }
+  return phpLeadingDocFallback(nodeLabel, nodeName, captureMap);
+}
+
+/** Detect Laravel route files by path convention. */
+function isPhpRouteFile(filePath: string): boolean {
+  return (
+    filePath.endsWith('.php') && (filePath.includes('/routes/') || filePath.startsWith('routes/'))
+  );
+}
+
+export const phpProvider = defineLanguage({
+  id: SupportedLanguages.PHP,
+  extensions: ['.php', '.phtml', '.php3', '.php4', '.php5', '.php8'],
+  entryPointPatterns: [
+    /Controller$/,
+    /^handle$/,
+    /^execute$/,
+    /^boot$/,
+    /^register$/,
+    /^__invoke$/,
+    /^(index|show|store|update|destroy|create|edit)$/,
+    /^(get|post|put|delete|patch)[A-Z]/,
+    /^run$/,
+    /^fire$/,
+    /^dispatch$/,
+    /Service$/,
+    /Repository$/,
+    /^find$/,
+    /^findAll$/,
+    /^save$/,
+    /^delete$/,
+  ],
+  astFrameworkPatterns: [
+    {
+      framework: 'laravel',
+      entryPointMultiplier: 3.0,
+      reason: 'php-route-attribute',
+      patterns: [
+        'Route::get',
+        'Route::post',
+        'Route::put',
+        'Route::delete',
+        'Route::resource',
+        'Route::apiResource',
+        '#[Route(',
+      ],
+    },
+  ] satisfies AstFrameworkPatternConfig[],
+  treeSitterQueries: PHP_QUERIES,
+  typeConfig: phpConfig,
+  exportChecker: phpExportChecker,
+  importResolver: createImportResolver(phpImportConfig),
+  callExtractor: createCallExtractor(phpCallConfig),
+  fieldExtractor: createFieldExtractor(phpFieldConfig),
+  methodExtractor: createMethodExtractor(phpMethodConfig),
+  variableExtractor: createVariableExtractor(phpVariableConfig),
+  classExtractor: createClassExtractor(phpClassConfig),
+  descriptionExtractor: phpDescriptionExtractor,
+  isRouteFile: isPhpRouteFile,
+  builtInNames: BUILT_INS,
+  // ── RFC #909 Ring 3: scope-based resolution hooks ──────────────────────
+  emitScopeCaptures: emitPhpScopeCaptures,
+  cfgVisitor: createPhpCfgVisitor(),
+  interpretImport: interpretPhpImport,
+  interpretTypeBinding: interpretPhpTypeBinding,
+  // LanguageProvider uses (def, callsite); phpArityCompatibility uses (def, callsite) — same.
+  arityCompatibility: phpArityCompatibility,
+  // LanguageProvider adapter: (parsedImport, workspaceIndex) → string | null
+  resolveImportTarget: resolvePhpImportTarget,
+  // mergeBindings on LanguageProvider: (scope, bindings) — ignore scope id,
+  // delegate to phpMergeBindings which uses binding origin tiers.
+  mergeBindings: (_scope, bindings) => [...phpMergeBindings(bindings)],
+  bindingScopeFor: phpBindingScopeFor,
+  importOwningScope: phpImportOwningScope,
+  receiverBinding: phpReceiverBinding,
+});
