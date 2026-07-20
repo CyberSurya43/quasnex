@@ -14,13 +14,25 @@ import tomllib
 
 _DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 _DEFAULT_NVIDIA_MODELS = (
+    "openai/gpt-oss-120b",
     "qwen/qwen3-next-80b-a3b-instruct",
+    "qwen/qwen2.5-coder-32b-instruct",
     "openai/gpt-oss-20b",
-    "mistralai/codestral-22b-instruct-v0.1",
-    "deepseek-ai/deepseek-coder-6.7b-instruct",
+    "meta/llama-3.1-70b-instruct",
+    "mistralai/mistral-nemotron",
+    "deepseek-ai/deepseek-v4-flash",
 )
 _DEFAULT_TEMPERATURE = 0.2
 _DEFAULT_MAX_RETRIES = 2
+_MODEL_ROLES = (
+    "planner",
+    "repository_search",
+    "documentation",
+    "coding",
+    "debugging",
+    "testing",
+    "deployment",
+)
 
 
 @dataclass(frozen=True)
@@ -34,11 +46,23 @@ class ProviderConfig:
     max_retries: int = _DEFAULT_MAX_RETRIES
 
 
+@dataclass(frozen=True)
+class ModelRoute:
+    """A concrete model selected for a task capability."""
+    provider: str
+    model: str
+
+    @property
+    def label(self) -> str:
+        return f"{self.provider}:{self.model}"
+
+
 @dataclass
 class EnvironmentConfig:
     """Configuration loaded from .env file for model access."""
     default_provider: str = "lightning"
     providers: dict[str, ProviderConfig] = field(default_factory=dict)
+    role_models: dict[str, tuple[ModelRoute, ...]] = field(default_factory=dict)
 
 
 def _read_env_file(project_dir: Path) -> dict[str, str]:
@@ -79,6 +103,127 @@ def _get_int(env_vars: dict[str, str], name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _parse_model_route(raw: str, role: str, providers: dict[str, ProviderConfig]) -> ModelRoute:
+    if ":" not in raw:
+        raise ValueError(
+            f"{role.upper()}_MODEL must use '<provider>:<model>', got {raw!r}"
+        )
+    provider_name, _, model_name = raw.partition(":")
+    provider_name = provider_name.strip()
+    model_name = model_name.strip()
+    if provider_name not in providers:
+        raise ValueError(
+            f"{role.upper()}_MODEL references unknown provider {provider_name!r}. "
+            f"Available: {', '.join(providers)}"
+        )
+    if model_name not in providers[provider_name].models:
+        raise ValueError(
+            f"{role.upper()}_MODEL references model {model_name!r}, which is not "
+            f"configured for provider {provider_name!r}. Available: "
+            f"{', '.join(providers[provider_name].models)}"
+        )
+    return ModelRoute(provider_name, model_name)
+
+
+def _route_if_available(
+    provider_name: str,
+    model_name: str,
+    providers: dict[str, ProviderConfig],
+) -> ModelRoute | None:
+    provider = providers.get(provider_name)
+    if provider is None or model_name not in provider.models:
+        return None
+    return ModelRoute(provider_name, model_name)
+
+
+def _first_configured_coder(providers: dict[str, ProviderConfig]) -> ModelRoute | None:
+    provider = providers.get("nvidia")
+    if provider is None:
+        return None
+    for model_name in provider.models:
+        lowered = model_name.lower()
+        if "coder" in lowered or "codestral" in lowered or "deepseek-coder" in lowered:
+            return ModelRoute("nvidia", model_name)
+    return None
+
+
+def _dedupe_routes(routes: list[ModelRoute]) -> tuple[ModelRoute, ...]:
+    seen: set[tuple[str, str]] = set()
+    deduped: list[ModelRoute] = []
+    for route in routes:
+        key = (route.provider, route.model)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(route)
+    return tuple(deduped)
+
+
+def _default_role_routes(providers: dict[str, ProviderConfig]) -> dict[str, tuple[ModelRoute, ...]]:
+    def available(*candidates: tuple[str, str]) -> list[ModelRoute]:
+        routes: list[ModelRoute] = []
+        for provider_name, model_name in candidates:
+            route = _route_if_available(provider_name, model_name, providers)
+            if route is not None:
+                routes.append(route)
+        return routes
+
+    nvidia_coder = _first_configured_coder(providers)
+    role_routes: dict[str, list[ModelRoute]] = {
+        "planner": available(
+            ("nvidia", "openai/gpt-oss-120b"),
+            ("nvidia", "qwen/qwen3-next-80b-a3b-instruct"),
+            ("lightning", "qwen2.5-coder:14b"),
+        ),
+        "repository_search": available(
+            ("nvidia", "qwen/qwen3-next-80b-a3b-instruct"),
+            ("nvidia", "openai/gpt-oss-120b"),
+        ),
+        "documentation": available(
+            ("nvidia", "qwen/qwen3-next-80b-a3b-instruct"),
+            ("nvidia", "openai/gpt-oss-120b"),
+        ),
+        "coding": available(("lightning", "qwen2.5-coder:14b")),
+        "debugging": available(
+            ("lightning", "qwen2.5-coder:14b"),
+            ("nvidia", "openai/gpt-oss-120b"),
+        ),
+        "testing": available(
+            ("nvidia", "openai/gpt-oss-120b"),
+            ("lightning", "qwen2.5-coder:14b"),
+        ),
+        "deployment": available(
+            ("nvidia", "openai/gpt-oss-120b"),
+            ("nvidia", "qwen/qwen3-next-80b-a3b-instruct"),
+        ),
+    }
+    if nvidia_coder is not None:
+        role_routes["coding"].append(nvidia_coder)
+    role_routes["coding"].extend(available(("nvidia", "openai/gpt-oss-120b")))
+
+    if providers:
+        first_provider_name = next(iter(providers))
+        fallback = ModelRoute(first_provider_name, providers[first_provider_name].models[0])
+        for role in _MODEL_ROLES:
+            role_routes.setdefault(role, []).append(fallback)
+
+    return {role: _dedupe_routes(routes) for role, routes in role_routes.items()}
+
+
+def _load_role_routes(
+    env_vars: dict[str, str],
+    providers: dict[str, ProviderConfig],
+) -> dict[str, tuple[ModelRoute, ...]]:
+    role_routes = _default_role_routes(providers)
+    for role in _MODEL_ROLES:
+        override = _get(env_vars, f"{role.upper()}_MODEL")
+        if override:
+            route = _parse_model_route(override, role, providers)
+            existing = [r for r in role_routes.get(role, ()) if r != route]
+            role_routes[role] = (route, *existing)
+    return role_routes
 
 
 def load_env(project_dir: Path) -> EnvironmentConfig:
@@ -123,7 +268,13 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
 
     default_provider = _get(env_vars, "DEFAULT_PROVIDER", next(iter(providers), "lightning"))
 
-    return EnvironmentConfig(default_provider=default_provider, providers=providers)
+    role_models = _load_role_routes(env_vars, providers)
+
+    return EnvironmentConfig(
+        default_provider=default_provider,
+        providers=providers,
+        role_models=role_models,
+    )
 
 
 def load_providers(project_dir: Path) -> dict[str, ProviderConfig]:
@@ -145,12 +296,12 @@ class AgentConfig:
     """A persona the LangGraph agent adopts for a stage.
 
     No shell command templates anymore — the same tool-using agent executes
-    every stage, just with a different system-prompt persona and (optionally)
-    a preferred model provider.
+    every stage, just with a different system-prompt persona. A provider value
+    only affects final fallback ordering after capability-role candidates fail.
     """
     name: str
     role: str
-    provider: str | None = None    # preferred provider key, e.g. "lightning"; None = use active
+    provider: str | None = None    # fallback provider key, e.g. "lightning"; None = configured order
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from ai_orchestrator.core import context as ctx_store
+from ai_orchestrator.core.runner import model_role_for_stage
 from ai_orchestrator.config import load_config
 from ai_orchestrator.scaffolding import init_project
 
@@ -52,24 +53,46 @@ class OrchestratorConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             project_dir = Path(tmp) / "app"
             init_project(project_dir, "sample-app")
-            ctx_store.record_stage_complete(project_dir, "00_intake_architecture", "codex_engineering", "lightning")
+            ctx_store.record_stage_complete(
+                project_dir,
+                "00_intake_architecture",
+                "codex_engineering",
+                "nvidia:openai/gpt-oss-120b",
+            )
 
             data = ctx_store.load(project_dir)
             self.assertEqual(len(data["completed_stages"]), 1)
             self.assertEqual(data["completed_stages"][0]["stage"], "00_intake_architecture")
-            self.assertEqual(data["completed_stages"][0]["model_used"], "lightning")
+            self.assertEqual(data["completed_stages"][0]["model_used"], "nvidia:openai/gpt-oss-120b")
 
     def test_context_records_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_dir = Path(tmp) / "app"
             init_project(project_dir, "sample-app")
             ctx_store.record_stage_failure(
-                project_dir, "10_frontend_gemini", "gemini_frontend", "nvidia", "credit exhausted"
+                project_dir,
+                "10_frontend_gemini",
+                "gemini_frontend",
+                "lightning:qwen2.5-coder:14b",
+                "credit exhausted",
             )
 
             data = ctx_store.load(project_dir)
             self.assertEqual(len(data["failures"]), 1)
             self.assertEqual(data["failures"][0]["reason"], "credit exhausted")
+
+    def test_stage_names_map_to_model_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp) / "app"
+            init_project(project_dir, "sample-app")
+            config = load_config(project_dir)
+            roles = {stage.name: model_role_for_stage(stage) for stage in config.stages}
+
+            self.assertEqual(roles["00_intake_architecture"], "planner")
+            self.assertEqual(roles["10_frontend_gemini"], "coding")
+            self.assertEqual(roles["20_backend_codex"], "coding")
+            self.assertEqual(roles["40_testing_codex"], "testing")
+            self.assertEqual(roles["50_deployment_codex"], "deployment")
 
 
 if __name__ == "__main__":

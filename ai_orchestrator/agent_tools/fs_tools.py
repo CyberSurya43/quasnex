@@ -12,6 +12,7 @@ from pathlib import Path
 from langchain_core.tools import BaseTool, tool
 
 from .confirm import confirm
+from .tool_context import ToolContext
 
 _IGNORE_DIRS = {
     ".git", ".orchestrator", ".venv", "venv", "node_modules", "__pycache__",
@@ -19,6 +20,13 @@ _IGNORE_DIRS = {
 }
 _MAX_READ_CHARS = 20_000
 _MAX_TREE_ENTRIES = 400
+_KG_FIRST_WARNING = (
+    "KG-FIRST WARNING: call resolve_issue(description) before reading/listing/searching "
+    "project files for a task. Continue only if this is an exact user-specified path "
+    "or KG results were empty/unhelpful.\n\n"
+)
+_MAX_EDIT_FAILURES_PER_FILE = 2
+_MAX_EDIT_ATTEMPTS_PER_FILE = 3
 
 
 class WorkspaceEscapeError(ValueError):
@@ -37,16 +45,27 @@ def _is_ignored(path: Path) -> bool:
     return any(part in _IGNORE_DIRS for part in path.parts)
 
 
-def build_tools(workspace_root: Path) -> list[BaseTool]:
+def build_tools(workspace_root: Path, context: ToolContext | None = None) -> list[BaseTool]:
     workspace_root = workspace_root.resolve()
     workspace_root.mkdir(parents=True, exist_ok=True)
+    context = context or ToolContext()
+
+    def kg_warning() -> str:
+        return "" if context.kg_resolved else _KG_FIRST_WARNING
 
     @tool
-    def read_file(path: str, offset: int = 0, limit: int = _MAX_READ_CHARS) -> str:
+    def read_file(
+        path: str,
+        offset: int = 0,
+        limit: int = _MAX_READ_CHARS,
+        line_start: int | None = None,
+        line_end: int | None = None,
+    ) -> str:
         """Read a file's text contents in the workspace.
 
         Large files are capped at ~20,000 chars by default — pass ``offset``
         (char index to start from) and ``limit`` to page through bigger files.
+        You may also pass 1-based ``line_start``/``line_end`` to read by line.
         """
         try:
             target = _resolve(workspace_root, path)
@@ -61,14 +80,33 @@ def build_tools(workspace_root: Path) -> list[BaseTool]:
         except UnicodeDecodeError:
             return f"Error: {path} is not a text file"
 
+        if line_start is not None or line_end is not None:
+            lines = text.splitlines()
+            start = max((line_start or 1) - 1, 0)
+            end = line_end if line_end is not None else len(lines)
+            if start >= len(lines):
+                return f"Error: {path} has only {len(lines)} lines"
+            numbered = [
+                f"{lineno}: {line}"
+                for lineno, line in enumerate(lines[start:end], start=start + 1)
+            ]
+            return kg_warning() + "\n".join(numbered)
+
         chunk = text[offset : offset + limit]
         if offset + limit < len(text):
             chunk += f"\n... [truncated, {len(text) - offset - limit} more chars — call again with a higher offset]"
-        return chunk
+        return kg_warning() + chunk
 
     @tool
-    def list_dir(path: str = ".") -> str:
-        """List files and subdirectories under a workspace-relative path."""
+    def list_dir(path: str = ".", depth: int | None = None, max_depth: int | None = None) -> str:
+        """List files and subdirectories under a workspace-relative path.
+
+        Pass ``depth`` or ``max_depth`` for a recursive tree-style listing.
+        """
+        requested_depth = depth if depth is not None else max_depth
+        if requested_depth and requested_depth > 1:
+            return project_tree(path, requested_depth)
+
         try:
             target = _resolve(workspace_root, path)
         except WorkspaceEscapeError as exc:
@@ -77,12 +115,12 @@ def build_tools(workspace_root: Path) -> list[BaseTool]:
             return f"Error: {path} does not exist"
         entries = sorted(e for e in target.iterdir() if e.name not in _IGNORE_DIRS)
         if not entries:
-            return "(empty directory)"
+            return kg_warning() + "(empty directory)"
         lines = []
         for entry in entries:
             marker = "/" if entry.is_dir() else ""
             lines.append(f"{entry.name}{marker}")
-        return "\n".join(lines)
+        return kg_warning() + "\n".join(lines)
 
     @tool
     def project_tree(path: str = ".", max_depth: int = 3) -> str:
@@ -119,7 +157,7 @@ def build_tools(workspace_root: Path) -> list[BaseTool]:
                     walk(entry, prefix + "  ", depth + 1)
 
         walk(target, "", 1)
-        return "\n".join(lines) if lines else "(empty)"
+        return kg_warning() + ("\n".join(lines) if lines else "(empty)")
 
     @tool
     def glob_files(pattern: str, path: str = ".") -> str:
@@ -143,14 +181,24 @@ def build_tools(workspace_root: Path) -> list[BaseTool]:
             return "No files matched"
         if len(matches) > 200:
             matches = matches[:200] + [f"... ({len(matches) - 200} more)"]
-        return "\n".join(matches)
+        return kg_warning() + "\n".join(matches)
 
     @tool
-    def search_code(pattern: str, path: str = ".") -> str:
+    def search_code(
+        pattern: str | None = None,
+        path: str = ".",
+        query: str | None = None,
+        max_results: int = 50,
+    ) -> str:
         """Search file contents for a plain-text substring under a workspace-relative path.
 
-        Returns up to 50 matching "file:line: text" results.
+        Returns matching "file:line: text" results. ``query`` is accepted as
+        an alias for ``pattern``.
         """
+        pattern = pattern or query
+        if not pattern:
+            return "Error: search_code requires a pattern or query"
+
         try:
             target = _resolve(workspace_root, path)
         except WorkspaceEscapeError as exc:
@@ -170,9 +218,9 @@ def build_tools(workspace_root: Path) -> list[BaseTool]:
             for lineno, line in enumerate(text.splitlines(), start=1):
                 if pattern in line:
                     matches.append(f"{rel}:{lineno}: {line.strip()}")
-                    if len(matches) >= 50:
-                        return "\n".join(matches)
-        return "\n".join(matches) if matches else "No matches found"
+                    if len(matches) >= max_results:
+                        return kg_warning() + "\n".join(matches)
+        return kg_warning() + ("\n".join(matches) if matches else "No matches found")
 
     @tool
     def write_file(path: str, content: str) -> str:
@@ -208,20 +256,48 @@ def build_tools(workspace_root: Path) -> list[BaseTool]:
         if not target.exists():
             return f"Error: {path} does not exist"
 
+        context.edit_attempts[path] = context.edit_attempts.get(path, 0) + 1
+        if context.edit_attempts[path] > _MAX_EDIT_ATTEMPTS_PER_FILE:
+            return (
+                f"HARD STOP: edit_file was called {context.edit_attempts[path]} times for {path} "
+                "in this tool session. Do not call edit_file again for this file. "
+                "Summarize the current state and ask for human review if more edits are needed."
+            )
+
         original = target.read_text(encoding="utf-8")
         occurrences = original.count(old_text)
         if occurrences == 0:
-            return f"Error: old_text not found in {path}"
+            context.edit_failures[path] = context.edit_failures.get(path, 0) + 1
+            if context.edit_failures[path] >= _MAX_EDIT_FAILURES_PER_FILE:
+                return (
+                    f"HARD STOP: edit_file failed {context.edit_failures[path]} times for {path}. "
+                    "Do not call edit_file again for this file until you call read_file with a "
+                    "narrow line_start/line_end range and quote the exact current text. "
+                    "Summarize the blocker if you cannot get an exact match."
+                )
+            return (
+                f"Error: old_text not found in {path}. Call read_file for the exact target "
+                "line range before retrying edit_file; do not guess old_text."
+            )
         if occurrences > 1:
+            context.edit_failures[path] = context.edit_failures.get(path, 0) + 1
+            if context.edit_failures[path] >= _MAX_EDIT_FAILURES_PER_FILE:
+                return (
+                    f"HARD STOP: edit_file matched multiple locations {context.edit_failures[path]} "
+                    f"times for {path}. Do not call edit_file again until you call read_file "
+                    "for a narrower line range and include unique surrounding context."
+                )
             return (
                 f"Error: old_text matches {occurrences} locations in {path} — "
-                "include more surrounding context so the edit is unambiguous"
+                "call read_file for a narrower line range and include more surrounding context "
+                "so the edit is unambiguous"
             )
 
         if not confirm("edit file", str(target.relative_to(workspace_root))):
             return f"Declined by user: not editing {path}"
 
         target.write_text(original.replace(old_text, new_text, 1), encoding="utf-8")
+        context.edit_failures.pop(path, None)
         return f"Edited {path}"
 
     @tool

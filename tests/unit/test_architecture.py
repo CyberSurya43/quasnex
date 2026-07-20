@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from ai_orchestrator.config import load_env
 from ai_orchestrator.llm import ModelRegistry, UnknownModelError, UnknownProviderError
 
 
@@ -18,7 +19,7 @@ def _write_env(project_dir: Path) -> None:
                 "LIGHTNING_API_KEY=test-lightning-key",
                 "LIGHTNING_MODELS=qwen2.5-coder:14b,qwen2.5-coder:7b",
                 "NVIDIA_API_KEY=test-nvidia-key",
-                "NVIDIA_MODELS=qwen/qwen3-next-80b-a3b-instruct,openai/gpt-oss-20b",
+                "NVIDIA_MODELS=openai/gpt-oss-120b,qwen/qwen3-next-80b-a3b-instruct,qwen/qwen2.5-coder-32b-instruct,openai/gpt-oss-20b",
             ]
         ),
         encoding="utf-8",
@@ -37,17 +38,59 @@ class ModelRegistryTests(unittest.TestCase):
             self.assertEqual(provider, "lightning")
             self.assertEqual(model, "qwen2.5-coder:14b")
 
-    def test_list_available_returns_all_providers_and_models(self) -> None:
+    def test_internal_list_available_returns_all_providers_and_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_dir = Path(tmp)
             _write_env(project_dir)
 
             registry = ModelRegistry(project_dir)
-            available = registry.list_available()
+            available = registry.list_internal_available()
 
             self.assertIn("lightning", available)
             self.assertIn("nvidia", available)
             self.assertIn("openai/gpt-oss-20b", available["nvidia"])
+
+    def test_visible_models_show_only_planner_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+
+            registry = ModelRegistry(project_dir)
+            visible = registry.list_visible_models()
+
+            self.assertEqual(visible, {"nvidia": ("openai/gpt-oss-120b",)})
+
+    def test_role_defaults_route_by_capability(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+
+            registry = ModelRegistry(project_dir)
+
+            self.assertEqual(registry.model_for_role("planner").label, "nvidia:openai/gpt-oss-120b")
+            self.assertEqual(registry.model_for_role("coding").label, "lightning:qwen2.5-coder:14b")
+            self.assertEqual(registry.model_for_role("debugging").label, "lightning:qwen2.5-coder:14b")
+            self.assertEqual(registry.model_for_role("testing").label, "nvidia:openai/gpt-oss-120b")
+
+    def test_role_override_must_reference_configured_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+            with (project_dir / ".env").open("a", encoding="utf-8") as env_file:
+                env_file.write("\nCODING_MODEL=nvidia:not-configured\n")
+
+            with self.assertRaises(ValueError):
+                load_env(project_dir)
+
+    def test_switch_role_persists_selected_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+
+            registry = ModelRegistry(project_dir)
+            registry.switch_role("coding")
+
+            self.assertEqual(registry.current(), ("lightning", "qwen2.5-coder:14b"))
 
     def test_switch_persists_across_registry_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

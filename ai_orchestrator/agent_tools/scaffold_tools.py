@@ -6,6 +6,7 @@ from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
 
+from .. import knowledge_graph as kg
 from ..scaffolding import init_project
 
 
@@ -22,6 +23,7 @@ def build_tools(base_dir: Path) -> list[BaseTool]:
             init_project(target, name)
         except FileExistsError as exc:
             return f"Error: {exc}"
+        kg.build_or_update(target / "workspace", target)
         return f"Created project {name!r} at {target}"
 
     return [scaffold_project]

@@ -4,9 +4,11 @@ Use this to implement a planned change.
 
 1. Work in the smallest coherent increment that leaves the project in a working state —
    don't try to write an entire app in one shot.
-2. Before creating a file, use `glob_files`/`project_tree` to check whether something
-   equivalent already exists. Prefer editing over duplicating.
-3. Use `read_file` on any file before `edit_file`-ing it, so `old_text` matches exactly.
+2. Before creating or reading files, call `resolve_issue(...)` with the planned change.
+   Read KG-ranked files first. Use `glob_files`/`project_tree` only if KG is empty,
+   unconvincing, or you need to confirm whether an equivalent file already exists.
+3. Use `read_file` on KG-ranked or exact target files before `edit_file`-ing them,
+   so `old_text` matches exactly.
 4. Use `write_file` for new files, `edit_file` for surgical changes to existing ones.
    Never paste an entire large file back through `edit_file` when a targeted change
    would do — it wastes context and increases the chance of an unwanted diff.

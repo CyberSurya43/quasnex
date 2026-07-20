@@ -12,6 +12,7 @@ Wraps ``langgraph.prebuilt.create_react_agent`` with:
 from __future__ import annotations
 
 import sqlite3
+import re
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -21,11 +22,22 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph.state import CompiledStateGraph
 
 from ..agent_tools import build_all_tools
+from .. import knowledge_graph as kg
 from ..llm import ModelRegistry
 from ..tools.senior_dev import get_agent_instructions
 from . import context as ctx_store
 
 ToolCallHook = Callable[[str, dict], None]
+_MAX_EDIT_TOOL_CALLS_PER_TURN = 3
+_MAX_TOOL_CALLS_PER_TURN = 25
+_KG_CONTEXT_RE = re.compile(
+    r"\b("
+    r"add|api|bug|build|change|code|component|create|creating|debug|deploy|"
+    r"documentation|error|failure|fetch|file|fix|folder|implement|issue|loader|"
+    r"modify|read|refactor|remove|repository|search|test|update|verify|write"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _checkpointer(project_dir: Path | None):
@@ -39,6 +51,16 @@ def _checkpointer(project_dir: Path | None):
 
 def _system_prompt(project_dir: Path | None, persona: str | None) -> str:
     parts = [persona or get_agent_instructions("codex")]
+    parts.append(
+        "## Tool Workflow\n"
+        "- KG-first rule: before reading files, listing folders, globbing, or searching code "
+        "for any repository task, use the injected knowledge graph resolver context or call "
+        "`resolve_issue(description)` yourself.\n"
+        "- Read the highest-ranked KG files first. Use `project_tree`, `list_dir`, "
+        "`search_code`, or `glob_files` only after KG context is present or clearly empty.\n"
+        "- Once you identify the target file, make the smallest needed edit, then run a focused "
+        "verification command when available."
+    )
     if project_dir is not None:
         context_block = ctx_store.inject_context_block(project_dir)
         if context_block:
@@ -87,11 +109,42 @@ class CodingAgent:
         """Start a fresh conversation thread (previous history stays in the checkpoint db)."""
         self._thread_suffix += 1
 
-    def send(self, message: str, on_tool_call: ToolCallHook | None = None) -> str:
+    def _message_with_kg_context(self, message: str) -> str:
+        """Pre-resolve repository requests locally before the LLM sees them."""
+        if not _KG_CONTEXT_RE.search(message):
+            return message
+
+        store_dir = self.project_dir or self.workspace_root
+        graph = kg.build_or_update(self.workspace_root, store_dir)
+        results = kg.resolve(message, graph, top_k=8)
+        formatted = kg.format_results(results) if results else (
+            "No strong KG matches. Use search_code/glob_files as a fallback, "
+            "and keep the search narrowly scoped."
+        )
+
+        return (
+            "Knowledge graph context resolver results for this request "
+            "(computed locally, no LLM call):\n"
+            f"{formatted}\n\n"
+            "KG-FIRST INSTRUCTION: use these files as the first places to inspect. "
+            "Only fall back to project_tree/list_dir/search_code/glob_files if the KG "
+            "results are empty or clearly wrong.\n\n"
+            f"User request:\n{message}"
+        )
+
+    def send(
+        self,
+        message: str,
+        on_tool_call: ToolCallHook | None = None,
+        recursion_limit: int = 40,
+    ) -> str:
         """Send a message, run the tool-use loop, and return the final assistant text."""
-        config = {"configurable": {"thread_id": self._thread_id()}, "recursion_limit": 50}
+        config = {"configurable": {"thread_id": self._thread_id()}, "recursion_limit": recursion_limit}
+        message = self._message_with_kg_context(message)
         final_text = ""
         seen = 0
+        edit_tool_calls = 0
+        total_tool_calls = 0
         for step in self._graph.stream(
             {"messages": [("user", message)]}, config, stream_mode="values"
         ):
@@ -99,9 +152,23 @@ class CodingAgent:
             for msg in messages[seen:]:
                 if isinstance(msg, AIMessage) and msg.content:
                     final_text = msg.content if isinstance(msg.content, str) else str(msg.content)
-                if isinstance(msg, AIMessage) and msg.tool_calls and on_tool_call:
+                if isinstance(msg, AIMessage) and msg.tool_calls:
                     for call in msg.tool_calls:
-                        on_tool_call(call["name"], call.get("args", {}))
+                        total_tool_calls += 1
+                        if call["name"] == "edit_file":
+                            edit_tool_calls += 1
+                            if edit_tool_calls > _MAX_EDIT_TOOL_CALLS_PER_TURN:
+                                raise RuntimeError(
+                                    "Stopped tool loop: edit_file was called too many times in one turn. "
+                                    "Re-read the exact target lines and continue in a fresh request."
+                                )
+                        if total_tool_calls > _MAX_TOOL_CALLS_PER_TURN:
+                            raise RuntimeError(
+                                "Stopped tool loop: too many tool calls in one turn. "
+                                "Summarize progress and continue with a narrower request."
+                            )
+                        if on_tool_call:
+                            on_tool_call(call["name"], call.get("args", {}))
             seen = len(messages)
         return final_text or "(no response)"
 

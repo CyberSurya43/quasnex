@@ -3,6 +3,7 @@
 from .loader import (
     load_env,
     EnvironmentConfig,
+    ModelRoute,
     ProviderConfig,
     load_providers,
     load_config,
@@ -15,6 +16,7 @@ from .loader import (
 __all__ = [
     "load_env",
     "EnvironmentConfig",
+    "ModelRoute",
     "ProviderConfig",
     "load_providers",
     "load_config",

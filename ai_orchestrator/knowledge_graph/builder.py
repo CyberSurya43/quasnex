@@ -12,6 +12,7 @@ changed, so it stays cheap to call often.
 from __future__ import annotations
 
 import ast
+from collections import Counter
 import re
 import time
 from pathlib import Path
@@ -29,6 +30,7 @@ _LANGUAGE_BY_EXT = {
 }
 _MAX_FILES = 4000
 _MAX_FILE_BYTES = 300_000
+_MAX_TERMS = 300
 
 _GENERIC_FUNC_RE = re.compile(
     r"^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)|"
@@ -47,6 +49,14 @@ _GENERIC_IMPORT_RE = re.compile(
     r"""#include\s+["<]([^">]+)[">])""",
     re.MULTILINE,
 )
+_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_TERM_STOPWORDS = {
+    "the", "and", "for", "from", "with", "this", "that", "then", "than", "else",
+    "const", "let", "var", "function", "return", "import", "export", "class",
+    "public", "private", "protected", "static", "true", "false", "null", "none",
+    "undefined", "async", "await", "type", "interface",
+}
 
 
 def _is_ignored(rel: Path) -> bool:
@@ -88,6 +98,31 @@ def _extract_symbols(text: str, language: str | None) -> tuple[list[str], list[s
     if language is not None:
         return _extract_generic(text)
     return [], [], []
+
+
+def _tokens(text: str) -> list[str]:
+    terms: list[str] = []
+    for raw in _TOKEN_RE.findall(text):
+        for part in _CAMEL_RE.sub(" ", raw).replace("_", " ").split():
+            part = part.lower()
+            if len(part) > 2 and part not in _TERM_STOPWORDS:
+                terms.append(part)
+    return terms
+
+
+def _term_counts(rel: Path, text: str, functions: list[str], classes: list[str], imports: list[str]) -> dict[str, int]:
+    """Build a small local lexical index for fuzzy KG resolution.
+
+    This intentionally stays simple and dependency-free: no LLM calls, no
+    embeddings, just capped token counts from path, symbols, imports, and file
+    text. It gives the resolver enough signal for UI strings and attributes
+    such as "due date picker" even when there is no matching symbol name.
+    """
+    counter: Counter[str] = Counter()
+    counter.update(_tokens(str(rel)))
+    counter.update(_tokens(" ".join(functions + classes + imports)))
+    counter.update(_tokens(text))
+    return dict(counter.most_common(_MAX_TERMS))
 
 
 def _resolve_import_targets(module: str, all_files: list[str]) -> list[str]:
@@ -135,13 +170,19 @@ def build_graph(workspace_root: Path, previous: dict[str, Any] | None = None) ->
         rel_str = str(rel)
         scanned += 1
         cached = prev_files.get(rel_str)
-        if cached and cached.get("mtime") == stat.st_mtime and cached.get("size") == stat.st_size:
+        if (
+            cached
+            and cached.get("mtime") == stat.st_mtime
+            and cached.get("size") == stat.st_size
+            and "terms" in cached
+        ):
             files[rel_str] = cached
             continue
 
         functions: list[str] = []
         classes: list[str] = []
         imports: list[str] = []
+        text = ""
         if language:
             try:
                 text = path.read_text(encoding="utf-8")
@@ -156,6 +197,7 @@ def build_graph(workspace_root: Path, previous: dict[str, Any] | None = None) ->
             "functions": sorted(set(functions))[:100],
             "classes": sorted(set(classes))[:100],
             "imports": sorted(set(imports))[:100],
+            "terms": _term_counts(rel, text, functions, classes, imports),
         }
 
     all_paths = list(files.keys())

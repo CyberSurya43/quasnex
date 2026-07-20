@@ -25,7 +25,7 @@ def handle_run(args) -> None:
 
     for result in results:
         mode = "executed" if result["executed"] else "dry-run"
-        provider = result.get("provider_used") or "n/a"
+        model = result.get("model_used") or "n/a"
         status = "ok" if result.get("success") else ("pending" if not result["executed"] else "FAILED")
-        print(f"[{mode}] {result['stage']} -> {result['agent']} (provider: {provider}, status: {status})")
+        print(f"[{mode}] {result['stage']} -> {result['agent']} (model: {model}, status: {status})")
         print(f"  task: {result['task_file']}")

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from langchain_openai import ChatOpenAI
 
-from ..config import EnvironmentConfig, ProviderConfig, load_env
+from ..config import EnvironmentConfig, ModelRoute, ProviderConfig, load_env
 from .providers import build_chat_model
 
 # Imported lazily inside methods (not at module scope) to avoid a circular
@@ -27,6 +27,10 @@ class UnknownProviderError(ValueError):
 
 
 class UnknownModelError(ValueError):
+    pass
+
+
+class UnknownModelRoleError(ValueError):
     pass
 
 
@@ -64,9 +68,44 @@ class ModelRegistry:
         """Return {provider_name: (model, ...)} for every configured provider."""
         return {name: cfg.models for name, cfg in self.env_config.providers.items()}
 
+    def list_internal_available(self) -> dict[str, tuple[str, ...]]:
+        """Return the full model inventory for routing and tests."""
+        return self.list_available()
+
+    def list_visible_models(self) -> dict[str, tuple[str, ...]]:
+        """Return only the planner/orchestrator model for user-facing model lists."""
+        route = self.planner_model()
+        return {route.provider: (route.model,)}
+
     def other_providers(self) -> list[str]:
         """Configured providers other than the currently active one, for fallback."""
         return [name for name in self.env_config.providers if name != self._provider_name]
+
+    def role_candidates(self, role: str) -> tuple[ModelRoute, ...]:
+        """Return configured model candidates for a capability role."""
+        try:
+            candidates = self.env_config.role_models[role]
+        except KeyError as exc:
+            raise UnknownModelRoleError(
+                f"Unknown model role {role!r}. Available: "
+                f"{', '.join(sorted(self.env_config.role_models))}"
+            ) from exc
+        if not candidates:
+            raise UnknownModelRoleError(f"Model role {role!r} has no configured candidates.")
+        return candidates
+
+    def model_for_role(self, role: str) -> ModelRoute:
+        """Return the primary model route for a capability role."""
+        return self.role_candidates(role)[0]
+
+    def planner_model(self) -> ModelRoute:
+        """Return the model shown as the visible orchestrator/planner model."""
+        return self.model_for_role("planner")
+
+    def switch_role(self, role: str) -> tuple[str, str]:
+        """Switch active model to the primary candidate for a capability role."""
+        route = self.model_for_role(role)
+        return self.switch(route.provider, route.model)
 
     def switch(self, provider_name: str, model_name: str | None = None) -> tuple[str, str]:
         """Switch the active provider/model, persisting the choice for next time."""

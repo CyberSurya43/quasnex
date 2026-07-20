@@ -5,13 +5,15 @@
 #   gemini_frontend  → UI/UX, responsive layout, accessibility, client-side behavior
 #   codex_engineering → architecture, backend, APIs, testing, deployment, release
 #
-# Every stage is executed by the same tool-using LangGraph coding agent — the
-# [agents.<id>] block below only supplies its persona (system-prompt role) and,
-# optionally, a preferred model `provider` ("lightning" or "nvidia", see .env).
+# Every stage is executed by the same tool-using LangGraph coding agent. The
+# orchestrator selects a model by capability role: planner, repository_search,
+# documentation, coding, debugging, testing, or deployment. The [agents.<id>]
+# block below supplies the persona and an optional provider preference used only
+# for final fallback ordering.
 #
 # Fallback policy:
-#   If the preferred (or active) provider errors out, the orchestrator retries
-#   the stage with the next configured provider, so work never stalls.
+#   If a role's primary model errors out, the orchestrator retries that role's
+#   configured fallback models, then any remaining configured provider models.
 #
 # Shared context:
 #   .orchestrator/context.json is read and written across every stage/session.

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import json
 
-from ..config import AgentConfig, StageConfig, load_config
+from ..config import AgentConfig, ModelRoute, StageConfig, load_config
 from .. import knowledge_graph as kg
 from . import context as ctx_store
 from .agent_graph import CodingAgent
@@ -20,6 +20,16 @@ _STAGE_SKILL_KEYWORDS = (
     ("architecture", "plan"),
 )
 
+_ROLE_STAGE_KEYWORDS = (
+    ("deployment", ("deploy", "release", "container", "docker")),
+    ("testing", ("test", "quality", "verification", "verify")),
+    ("debugging", ("debug", "fix", "failure", "bug")),
+    ("planner", ("intake", "architecture", "plan")),
+    ("repository_search", ("repository", "repo search", "context", "knowledge graph")),
+    ("coding", ("frontend", "backend", "integration", "build", "code")),
+    ("documentation", ("doc", "handoff", "api-contract", "contract")),
+)
+
 
 def _matching_skill(stage_name: str) -> str | None:
     lowered = stage_name.lower()
@@ -27,6 +37,20 @@ def _matching_skill(stage_name: str) -> str | None:
         if keyword in lowered:
             return skill_name
     return "build"  # frontend/backend/integration stages all write code
+
+
+def model_role_for_stage(stage: StageConfig) -> str:
+    """Pick the model capability role for a pipeline stage."""
+    identity = f"{stage.name} {stage.title}".lower()
+    for role, keywords in _ROLE_STAGE_KEYWORDS:
+        if any(keyword in identity for keyword in keywords):
+            return role
+
+    objective = stage.objective.lower()
+    for role, keywords in _ROLE_STAGE_KEYWORDS:
+        if any(keyword in objective for keyword in keywords):
+            return role
+    return "coding"
 
 
 class Orchestrator:
@@ -113,7 +137,7 @@ class Orchestrator:
                 "- File writes and shell commands require interactive confirmation.",
                 "- Each stage writes completion notes into `.orchestrator/notes/<stage>.md`.",
                 "- If the active model provider errors out, the run falls back to the other",
-                "  configured provider (lightning <-> nvidia) and resumes from the same task file.",
+                "  configured role candidate and resumes from the same task file.",
                 "- Shared context is maintained in `.orchestrator/context.json`.",
             ]
         )
@@ -136,19 +160,20 @@ class Orchestrator:
             "agent": stage.agent,
             "task_file": str(task_file),
             "executed": execute,
-            "provider_used": None,
+            "model_used": None,
             "success": None,
         }
 
         if not execute:
             return result
 
-        provider_order = self._provider_order(agent)
+        model_role = model_role_for_stage(stage)
+        model_order = self._model_order(model_role, agent)
         task_prompt = task_file.read_text(encoding="utf-8")
 
-        for provider_name in provider_order:
+        for route in model_order:
             try:
-                self.registry.switch(provider_name)
+                self.registry.switch(route.provider, route.model)
                 coding_agent = CodingAgent(
                     self.registry,
                     workspace_root=self.config.workspace,
@@ -156,25 +181,25 @@ class Orchestrator:
                     persona=agent.role,
                 )
                 coding_agent.send(task_prompt)
-                result["provider_used"] = provider_name
+                result["model_used"] = route.label
                 result["success"] = True
                 ctx_store.record_stage_complete(
-                    self.project_dir, stage.name, stage.agent, provider_name
+                    self.project_dir, stage.name, stage.agent, route.label
                 )
                 return result
             except Exception as exc:
                 reason = str(exc)
                 print(
-                    f"  [fallback] provider {provider_name!r} failed for stage {stage.name!r} "
-                    f"({reason}). Trying next provider..."
+                    f"  [fallback] model {route.label!r} failed for stage {stage.name!r} "
+                    f"({reason}). Trying next model..."
                 )
                 ctx_store.record_stage_failure(
-                    self.project_dir, stage.name, stage.agent, provider_name, reason
+                    self.project_dir, stage.name, stage.agent, route.label, reason
                 )
 
         result["success"] = False
-        result["provider_used"] = "none"
-        print(f"  [ERROR] All providers failed for stage {stage.name!r}. Manual intervention required.")
+        result["model_used"] = "none"
+        print(f"  [ERROR] All models failed for stage {stage.name!r}. Manual intervention required.")
         return result
 
     def _provider_order(self, agent: AgentConfig) -> list[str]:
@@ -183,6 +208,20 @@ class Orchestrator:
         if agent.provider and agent.provider in available:
             return [agent.provider] + [p for p in available if p != agent.provider]
         return available
+
+    def _model_order(self, role: str, agent: AgentConfig) -> list[ModelRoute]:
+        """Preferred role candidates first, then any remaining configured models."""
+        routes = list(self.registry.role_candidates(role))
+
+        seen = {(route.provider, route.model) for route in routes}
+        for provider_name in self._provider_order(agent):
+            for model_name in self.registry.env_config.providers[provider_name].models:
+                key = (provider_name, model_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                routes.append(ModelRoute(provider_name, model_name))
+        return routes
 
     def _add_professional_guidelines(self, stage: StageConfig) -> str:
         lines = ["", "---", "## Professional Development Guidelines", ""]
@@ -234,6 +273,7 @@ class Orchestrator:
             f"Project: `{self.config.name}`",
             f"Workspace: `{self.config.workspace}`",
             f"Stage: `{stage.name}`",
+            f"Model role: `{model_role_for_stage(stage)}`",
             "",
             "## Agent Role",
             "",

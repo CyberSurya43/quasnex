@@ -9,9 +9,17 @@ from pathlib import Path
 from langchain_core.tools import BaseTool, tool
 
 from .. import knowledge_graph as kg
+from .tool_context import ToolContext
 
 
-def build_tools(workspace_root: Path, project_dir: Path | None) -> list[BaseTool]:
+def build_tools(
+    workspace_root: Path,
+    project_dir: Path | None,
+    context: ToolContext | None = None,
+) -> list[BaseTool]:
+    kg_store_dir = project_dir or workspace_root
+    context = context or ToolContext()
+
     @tool
     def build_knowledge_graph() -> str:
         """(Re)index the project into a knowledge graph of files, functions/classes,
@@ -19,7 +27,9 @@ def build_tools(workspace_root: Path, project_dir: Path | None) -> list[BaseTool
         existing/unfamiliar project, before exploring file-by-file. Safe to call
         again later — unchanged files are reused, so re-indexing is cheap.
         """
-        graph = kg.build_or_update(workspace_root, project_dir)
+        context.kg_resolved = True
+        context.last_resolve_description = "build_knowledge_graph"
+        graph = kg.build_or_update(workspace_root, kg_store_dir)
         return (
             f"Indexed {len(graph['files'])} files and {len(graph['edges'])} import edges. "
             "Use resolve_issue(description) to find where a reported problem likely lives."
@@ -32,7 +42,9 @@ def build_tools(workspace_root: Path, project_dir: Path | None) -> list[BaseTool
         blindly. Refreshes the graph first (cheap — only changed files are
         re-parsed), so it reflects the current state of the code.
         """
-        graph = kg.build_or_update(workspace_root, project_dir)
+        context.kg_resolved = True
+        context.last_resolve_description = description
+        graph = kg.build_or_update(workspace_root, kg_store_dir)
         results = kg.resolve(description, graph, top_k=top_k)
         return kg.format_results(results)
 
@@ -40,7 +52,7 @@ def build_tools(workspace_root: Path, project_dir: Path | None) -> list[BaseTool
     def kg_stats() -> str:
         """Show a summary of the current knowledge graph (files indexed, symbol
         counts, when it was last built)."""
-        graph = kg.load_graph(project_dir) if project_dir else None
+        graph = kg.load_graph(kg_store_dir)
         if not graph:
             return "No knowledge graph built yet. Call build_knowledge_graph() first."
         files = graph.get("files", {})
