@@ -105,7 +105,7 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
         """
         requested_depth = depth if depth is not None else max_depth
         if requested_depth and requested_depth > 1:
-            return project_tree(path, requested_depth)
+            return project_tree.func(path, requested_depth)
 
         try:
             target = _resolve(workspace_root, path)

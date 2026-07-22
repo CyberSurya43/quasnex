@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 import re
 
@@ -17,6 +18,26 @@ from ai_orchestrator.llm import ModelRegistry, UnknownModelError, UnknownProvide
 from ai_orchestrator.skills import list_skills, load_skill
 
 console = Console()
+
+# Tracks the active "thinking..." spinner (if any) so a confirmation prompt
+# fired mid-turn (edit_file/write_file/delete_file) can pause it first —
+# Rich only supports one live-updating region per console, and a Confirm.ask
+# nested inside an active Status blocks on stdin without ever showing its
+# prompt, which looks like the agent hanging.
+_active_status = None
+
+
+@contextmanager
+def _thinking_status():
+    global _active_status
+    status = console.status("[dim]thinking...[/dim]", spinner="dots")
+    status.start()
+    _active_status = status
+    try:
+        yield
+    finally:
+        status.stop()
+        _active_status = None
 
 _SKILL_MODEL_ROLES = {
     "plan": "planner",
@@ -73,7 +94,13 @@ HELP_TEXT = """\
 
 
 def _confirm_sink(action: str, detail: str) -> bool:
-    return Confirm.ask(f"[yellow]Allow[/yellow] {action}: [bold]{detail}[/bold]?", default=False)
+    if _active_status is not None:
+        _active_status.stop()
+    try:
+        return Confirm.ask(f"[yellow]Allow[/yellow] {action}: [bold]{detail}[/bold]?", default=False)
+    finally:
+        if _active_status is not None:
+            _active_status.start()
 
 
 class ChatSession:
@@ -151,7 +178,7 @@ class ChatSession:
         try:
             self.registry.switch_role(model_role)
             self.agent.rebuild()
-            with console.status("[dim]thinking...[/dim]", spinner="dots"):
+            with _thinking_status():
                 response = self.agent.send(
                     message,
                     on_tool_call=on_tool_call,
@@ -195,10 +222,11 @@ class ChatSession:
             f"switching to {fallback.label} and retrying...[/yellow]"
         )
         self.registry.switch(fallback.provider, fallback.model)
+        self.agent.clear_history()
         self.agent.rebuild()
 
         try:
-            with console.status("[dim]thinking...[/dim]", spinner="dots"):
+            with _thinking_status():
                 return self.agent.send(
                     message,
                     on_tool_call=on_tool_call,
