@@ -25,7 +25,6 @@ _KG_FIRST_WARNING = (
     "project files for a task. Continue only if this is an exact user-specified path "
     "or KG results were empty/unhelpful.\n\n"
 )
-_PERMISSION_REQUIRED_PREFIX = "HARD STOP: permission required."
 _MAX_EDIT_FAILURES_PER_FILE = 2
 _MAX_EDIT_ATTEMPTS_PER_FILE = 3
 
@@ -82,11 +81,15 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
     def kg_warning() -> str:
         return "" if context.kg_resolved else _KG_FIRST_WARNING
 
-    def permission_required(action: str, path: str) -> str:
+    def permission_declined(action: str, path: str) -> str:
+        # Deliberately NOT a "HARD STOP" — a single declined confirmation should
+        # not abort the whole agent turn (see run_shell's graceful decline for
+        # the same pattern). The agent should move on to other work or ask the
+        # user, not repeat the exact same write/edit/delete on this file.
         return (
-            f"{_PERMISSION_REQUIRED_PREFIX} User approval is required to {action} {path}. "
-            "Do not retry this tool call or try another write/edit/delete path. "
-            "Wait for the user to approve or change the request."
+            f"Declined by user: {action} on {path} was not approved. The file was not modified. "
+            "Do not retry this exact operation on this file — continue with other work, "
+            "or ask the user before trying again."
         )
 
     @tool
@@ -271,7 +274,7 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
 
         action = "overwrite" if target.exists() else "create"
         if not confirm(f"{action} file", str(target.relative_to(workspace_root))):
-            return permission_required(action, path)
+            return permission_declined(action, path)
 
         target.parent.mkdir(parents=True, exist_ok=True)
         result = _fix_and_retry(
@@ -337,7 +340,7 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
             )
 
         if not confirm("edit file", str(target.relative_to(workspace_root))):
-            return permission_required("edit", path)
+            return permission_declined("edit", path)
 
         def _do_edit():
             target.write_text(original.replace(old_text, new_text, 1), encoding="utf-8")
@@ -363,7 +366,7 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
             return f"Error: {path} is not a file"
 
         if not confirm("delete file", str(target.relative_to(workspace_root))):
-            return permission_required("delete", path)
+            return permission_declined("delete", path)
 
         return _fix_and_retry(
             "delete",

@@ -16,8 +16,6 @@ from typing import Any
 _STOPWORDS = {
     "the", "a", "an", "is", "are", "to", "of", "in", "on", "for", "and", "or",
     "it", "this", "that", "when", "with", "not", "does", "do", "why", "how",
-    "error", "issue", "bug", "problem", "fails", "failing", "fix", "broken",
-    "change", "changes", "update", "implement", "create", "creating", "user",
     "tries", "manual", "manually", "should", "need", "needs", "done",
 }
 _SPLIT_RE = re.compile(r"[^A-Za-z0-9]+")

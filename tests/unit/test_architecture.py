@@ -68,8 +68,14 @@ class ModelRegistryTests(unittest.TestCase):
             registry = ModelRegistry(project_dir)
 
             self.assertEqual(registry.model_for_role("planner").label, "nvidia:openai/gpt-oss-120b")
-            self.assertEqual(registry.model_for_role("coding").label, "lightning:qwen2.5-coder:14b")
-            self.assertEqual(registry.model_for_role("debugging").label, "lightning:qwen2.5-coder:14b")
+            # "coding"/"debugging" must lead with the strongest configured OSS
+            # model (the code-tuned 32B here), not the small local fallback.
+            self.assertEqual(
+                registry.model_for_role("coding").label, "nvidia:qwen/qwen2.5-coder-32b-instruct"
+            )
+            self.assertEqual(
+                registry.model_for_role("debugging").label, "nvidia:qwen/qwen2.5-coder-32b-instruct"
+            )
             self.assertEqual(registry.model_for_role("testing").label, "nvidia:openai/gpt-oss-120b")
 
     def test_role_override_must_reference_configured_model(self) -> None:
@@ -90,7 +96,7 @@ class ModelRegistryTests(unittest.TestCase):
             registry = ModelRegistry(project_dir)
             registry.switch_role("coding")
 
-            self.assertEqual(registry.current(), ("lightning", "qwen2.5-coder:14b"))
+            self.assertEqual(registry.current(), ("nvidia", "qwen/qwen2.5-coder-32b-instruct"))
 
     def test_switch_persists_across_registry_instances(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -14,7 +14,7 @@ from rich.prompt import Confirm
 from ai_orchestrator import knowledge_graph as kg
 from ai_orchestrator.agent_tools import set_confirmation_sink
 from ai_orchestrator.agent_tools.confirm import set_os_permission_sink
-from ai_orchestrator.core import CodingAgent, HardStopError
+from ai_orchestrator.core import CodingAgent, HardStopError, MIN_RECURSION_LIMIT
 from ai_orchestrator.llm import ModelRegistry, UnknownModelError, UnknownProviderError
 from ai_orchestrator.skills import list_skills, load_skill
 
@@ -47,8 +47,8 @@ _SKILL_MODEL_ROLES = {
     "test": "testing",
     "deploy": "deployment",
 }
-_DEFAULT_RECURSION_LIMIT = 40
-_WORKFLOW_RECURSION_LIMIT = 28
+_DEFAULT_RECURSION_LIMIT = MIN_RECURSION_LIMIT
+_WORKFLOW_RECURSION_LIMIT = MIN_RECURSION_LIMIT
 _WORKFLOW_REQUEST_RE = re.compile(
     r"\b("
     r"add|build|change|create|debug|fix|implement|make|modify|refactor|remove|"
@@ -58,7 +58,6 @@ _WORKFLOW_REQUEST_RE = re.compile(
 )
 _NON_RETRYABLE_ERRORS = (
     "HARD STOP:",
-    "permission required",
     "Stopped tool loop:",
 )
 _PLAN_WORKFLOW = (
@@ -218,8 +217,27 @@ class ChatSession:
             if response is None:
                 return None
 
+        self._print_verification()
         console.print(Markdown(response))
         return response
+
+    def _print_verification(self) -> None:
+        verification = self.agent.last_verification
+        if verification is None:
+            return
+        if not verification.attempted:
+            console.print(
+                "[dim]No test command detected for this project — changes were not auto-verified.[/dim]"
+            )
+        elif not verification.ran:
+            console.print(f"[dim]Verification skipped: user declined to run `{verification.command}`.[/dim]")
+        elif verification.passed:
+            console.print(f"[green]✓ Verified:[/green] `{verification.command}` passed.")
+        else:
+            console.print(
+                f"[red]✗ Verification failed:[/red] `{verification.command}` still failing "
+                "after auto-fix attempts."
+            )
 
     def _retry_with_fallback(
         self,

@@ -77,7 +77,10 @@ class KgFirstToolTests(unittest.TestCase):
             self.assertIn("HARD STOP", fourth)
             self.assertIn("edit_file was called 4 times", fourth)
 
-    def test_write_and_edit_permission_denial_are_hard_stops(self) -> None:
+    def test_write_and_edit_permission_denial_are_soft_declines(self) -> None:
+        """A single declined confirmation must NOT be a HARD STOP: it should let the
+        agent continue the turn (e.g. move on to other files) instead of aborting the
+        whole run, unlike the repeat-failure hard stops above."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             (workspace / "app.py").write_text("value = 1\n", encoding="utf-8")
@@ -92,10 +95,10 @@ class KgFirstToolTests(unittest.TestCase):
                 {"path": "app.py", "old_text": "value = 1", "new_text": "value = 2"}
             )
 
-            self.assertIn("HARD STOP: permission required", write_result)
-            self.assertIn("Do not retry", write_result)
-            self.assertIn("HARD STOP: permission required", edit_result)
-            self.assertIn("Do not retry", edit_result)
+            self.assertNotIn("HARD STOP", write_result)
+            self.assertIn("Declined by user", write_result)
+            self.assertNotIn("HARD STOP", edit_result)
+            self.assertIn("Declined by user", edit_result)
 
 
 if __name__ == "__main__":

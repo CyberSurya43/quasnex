@@ -37,7 +37,7 @@ def _run(command: list[str], workspace_root: Path, timeout: int = _DEFAULT_TIMEO
     return f"exit code: {result.returncode}\n{output[:_OUTPUT_CAP]}"
 
 
-def _detect_test_command(workspace_root: Path) -> str | None:
+def detect_test_command(workspace_root: Path) -> str | None:
     if (workspace_root / "pytest.ini").exists() or (workspace_root / "pyproject.toml").exists():
         return "python -m pytest -q"
     if (workspace_root / "manage.py").exists():
@@ -72,7 +72,7 @@ def build_tools(workspace_root: Path) -> list[BaseTool]:
         Auto-detects pytest/Django/npm/go/cargo from the workspace if no
         explicit command is given. Asks the user for confirmation before running.
         """
-        cmd = command or _detect_test_command(workspace_root)
+        cmd = command or detect_test_command(workspace_root)
         if cmd is None:
             return (
                 "Error: could not auto-detect a test command for this project. "

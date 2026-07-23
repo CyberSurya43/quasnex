@@ -40,7 +40,7 @@ class _DummyAgent:
     sent_messages: list[str] = []
 
     def __init__(self, *args, **kwargs):
-        pass
+        self.last_verification = None
 
     def rebuild(self) -> None:
         pass

@@ -181,8 +181,24 @@ class Orchestrator:
                     persona=agent.role,
                 )
                 coding_agent.send(task_prompt)
+                verification = coding_agent.last_verification
+                if verification is not None and verification.ran and verification.passed is False:
+                    # The agent stopped, but its own auto-fix attempts didn't get the
+                    # project's test command passing. Treat this like any other
+                    # model failure and let the next candidate model have a try —
+                    # "the call didn't throw" is not evidence of success.
+                    reason = f"post-edit verification failed: {verification.command}"
+                    print(
+                        f"  [verify-fail] model {route.label!r} finished stage {stage.name!r} but "
+                        f"{reason}. Trying next model..."
+                    )
+                    ctx_store.record_stage_failure(
+                        self.project_dir, stage.name, stage.agent, route.label, reason
+                    )
+                    continue
                 result["model_used"] = route.label
                 result["success"] = True
+                result["verified"] = verification.passed if verification is not None else None
                 ctx_store.record_stage_complete(
                     self.project_dir, stage.name, stage.agent, route.label
                 )

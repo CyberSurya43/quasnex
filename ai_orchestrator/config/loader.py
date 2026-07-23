@@ -185,11 +185,12 @@ def _default_role_routes(providers: dict[str, ProviderConfig]) -> dict[str, tupl
             ("nvidia", "qwen/qwen3-next-80b-a3b-instruct"),
             ("nvidia", "openai/gpt-oss-120b"),
         ),
-        "coding": available(("lightning", "qwen2.5-coder:14b")),
-        "debugging": available(
-            ("lightning", "qwen2.5-coder:14b"),
-            ("nvidia", "openai/gpt-oss-120b"),
-        ),
+        # "coding"/"debugging" are built below the dict: the strongest
+        # code-tuned OSS model configured (e.g. qwen2.5-coder-32b-instruct)
+        # leads, then the largest general OSS model, with the small local
+        # model as a last-resort fallback for lightning-only setups.
+        "coding": [],
+        "debugging": [],
         "testing": available(
             ("nvidia", "openai/gpt-oss-120b"),
             ("lightning", "qwen2.5-coder:14b"),
@@ -199,9 +200,11 @@ def _default_role_routes(providers: dict[str, ProviderConfig]) -> dict[str, tupl
             ("nvidia", "qwen/qwen3-next-80b-a3b-instruct"),
         ),
     }
-    if nvidia_coder is not None:
-        role_routes["coding"].append(nvidia_coder)
-    role_routes["coding"].extend(available(("nvidia", "openai/gpt-oss-120b")))
+    for role in ("coding", "debugging"):
+        if nvidia_coder is not None:
+            role_routes[role].append(nvidia_coder)
+        role_routes[role].extend(available(("nvidia", "openai/gpt-oss-120b")))
+        role_routes[role].extend(available(("lightning", "qwen2.5-coder:14b")))
 
     if providers:
         first_provider_name = next(iter(providers))
