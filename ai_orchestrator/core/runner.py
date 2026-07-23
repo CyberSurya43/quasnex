@@ -8,7 +8,7 @@ import json
 from ..config import AgentConfig, ModelRoute, StageConfig, load_config
 from .. import knowledge_graph as kg
 from . import context as ctx_store
-from .agent_graph import CodingAgent
+from .agent_graph import CodingAgent, HardStopError
 from ..llm import ModelRegistry
 from ..skills import load_skill
 from ..tools.senior_dev import get_rules_for_stage, DevelopmentTools
@@ -187,6 +187,11 @@ class Orchestrator:
                     self.project_dir, stage.name, stage.agent, route.label
                 )
                 return result
+            except HardStopError:
+                # Hard-stops are policy decisions (too many retries, permission
+                # denied, etc.) — re-raise immediately.  Provider fallback would
+                # just repeat the same outcome with a different model.
+                raise
             except Exception as exc:
                 reason = str(exc)
                 print(

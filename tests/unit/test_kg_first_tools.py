@@ -77,6 +77,26 @@ class KgFirstToolTests(unittest.TestCase):
             self.assertIn("HARD STOP", fourth)
             self.assertIn("edit_file was called 4 times", fourth)
 
+    def test_write_and_edit_permission_denial_are_hard_stops(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "app.py").write_text("value = 1\n", encoding="utf-8")
+            context = ToolContext(kg_resolved=True)
+            set_confirmation_sink(lambda _action, _detail: False)
+            fs = fs_tools.build_tools(workspace, context)
+            write_file = _tool_by_name(fs, "write_file")
+            edit_file = _tool_by_name(fs, "edit_file")
+
+            write_result = write_file.invoke({"path": "created.py", "content": "x = 1\n"})
+            edit_result = edit_file.invoke(
+                {"path": "app.py", "old_text": "value = 1", "new_text": "value = 2"}
+            )
+
+            self.assertIn("HARD STOP: permission required", write_result)
+            self.assertIn("Do not retry", write_result)
+            self.assertIn("HARD STOP: permission required", edit_result)
+            self.assertIn("Do not retry", edit_result)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
 
-from .confirm import confirm
+from .confirm import confirm, request_os_permission
 from .tool_context import ToolContext
 
 _IGNORE_DIRS = {
@@ -25,6 +25,7 @@ _KG_FIRST_WARNING = (
     "project files for a task. Continue only if this is an exact user-specified path "
     "or KG results were empty/unhelpful.\n\n"
 )
+_PERMISSION_REQUIRED_PREFIX = "HARD STOP: permission required."
 _MAX_EDIT_FAILURES_PER_FILE = 2
 _MAX_EDIT_ATTEMPTS_PER_FILE = 3
 
@@ -50,8 +51,43 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
     workspace_root.mkdir(parents=True, exist_ok=True)
     context = context or ToolContext()
 
+    def _fix_and_retry(action: str, path: Path, write_fn):
+        """Run write_fn(); if a PermissionError is raised, ask the user whether
+        to chmod u+w and retry once.  Returns the result string."""
+        try:
+            return write_fn()
+        except PermissionError as exc:
+            rel = str(path.relative_to(workspace_root))
+            reason = str(exc)
+            if request_os_permission(action, rel, reason):
+                try:
+                    path.chmod(path.stat().st_mode | 0o200)  # add owner-write bit
+                except OSError as chmod_exc:
+                    return (
+                        f"Error: could not fix permissions on {rel}: {chmod_exc}. "
+                        "Resolve the file permissions manually and try again."
+                    )
+                try:
+                    return write_fn()  # retry after chmod
+                except PermissionError as exc2:
+                    return (
+                        f"Error: still cannot {action} {rel} after chmod: {exc2}. "
+                        "Check that the parent directory is also writable."
+                    )
+            return (
+                f"Skipped {action} on {rel}: user declined to grant write permission. "
+                "The file was not modified."
+            )
+
     def kg_warning() -> str:
         return "" if context.kg_resolved else _KG_FIRST_WARNING
+
+    def permission_required(action: str, path: str) -> str:
+        return (
+            f"{_PERMISSION_REQUIRED_PREFIX} User approval is required to {action} {path}. "
+            "Do not retry this tool call or try another write/edit/delete path. "
+            "Wait for the user to approve or change the request."
+        )
 
     @tool
     def read_file(
@@ -235,11 +271,18 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
 
         action = "overwrite" if target.exists() else "create"
         if not confirm(f"{action} file", str(target.relative_to(workspace_root))):
-            return f"Declined by user: not writing {path}"
+            return permission_required(action, path)
 
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        return f"Wrote {len(content)} chars to {path}"
+        result = _fix_and_retry(
+            "write",
+            target,
+            lambda: (
+                target.write_text(content, encoding="utf-8")
+                or f"Wrote {len(content)} chars to {path}"
+            ),
+        )
+        return result
 
     @tool
     def edit_file(path: str, old_text: str, new_text: str) -> str:
@@ -294,11 +337,18 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
             )
 
         if not confirm("edit file", str(target.relative_to(workspace_root))):
-            return f"Declined by user: not editing {path}"
+            return permission_required("edit", path)
 
-        target.write_text(original.replace(old_text, new_text, 1), encoding="utf-8")
+        def _do_edit():
+            target.write_text(original.replace(old_text, new_text, 1), encoding="utf-8")
+            return f"Edited {path}"
+
+        result = _fix_and_retry("edit", target, _do_edit)
+        if result.startswith("Skipped") or result.startswith("Error"):
+            # Don't clear edit_failures on a skip/error
+            return result
         context.edit_failures.pop(path, None)
-        return f"Edited {path}"
+        return result
 
     @tool
     def delete_file(path: str) -> str:
@@ -313,10 +363,13 @@ def build_tools(workspace_root: Path, context: ToolContext | None = None) -> lis
             return f"Error: {path} is not a file"
 
         if not confirm("delete file", str(target.relative_to(workspace_root))):
-            return f"Declined by user: not deleting {path}"
+            return permission_required("delete", path)
 
-        target.unlink()
-        return f"Deleted {path}"
+        return _fix_and_retry(
+            "delete",
+            target,
+            lambda: (target.unlink() or f"Deleted {path}"),
+        )
 
     return [
         read_file,

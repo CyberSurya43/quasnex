@@ -13,7 +13,8 @@ from rich.prompt import Confirm
 
 from ai_orchestrator import knowledge_graph as kg
 from ai_orchestrator.agent_tools import set_confirmation_sink
-from ai_orchestrator.core import CodingAgent
+from ai_orchestrator.agent_tools.confirm import set_os_permission_sink
+from ai_orchestrator.core import CodingAgent, HardStopError
 from ai_orchestrator.llm import ModelRegistry, UnknownModelError, UnknownProviderError
 from ai_orchestrator.skills import list_skills, load_skill
 
@@ -54,6 +55,11 @@ _WORKFLOW_REQUEST_RE = re.compile(
     r"update|write"
     r")\b",
     re.IGNORECASE,
+)
+_NON_RETRYABLE_ERRORS = (
+    "HARD STOP:",
+    "permission required",
+    "Stopped tool loop:",
 )
 _PLAN_WORKFLOW = (
     (
@@ -103,6 +109,19 @@ def _confirm_sink(action: str, detail: str) -> bool:
             _active_status.start()
 
 
+def _os_permission_sink(action: str, path: str, reason: str) -> bool:
+    """Shown when the filesystem itself denies a write (OS PermissionError)."""
+    console.print(
+        f"\n[bold red]\u26a0 Access Denied[/bold red]  "
+        f"Cannot {action} [bold]{path}[/bold]\n"
+        f"  [dim]OS reason:[/dim] {reason}"
+    )
+    return Confirm.ask(
+        f"Fix permissions ([bold]chmod u+w {path}[/bold]) and retry?",
+        default=False,
+    )
+
+
 class ChatSession:
     """Interactive chat session backed by a tool-using LangGraph agent."""
 
@@ -112,6 +131,7 @@ class ChatSession:
         self.kg_store_dir = project_dir or self.workspace_root
 
         set_confirmation_sink(_confirm_sink)
+        set_os_permission_sink(_os_permission_sink)
 
         self.registry = ModelRegistry(project_dir)
         self.registry.switch_role("planner")
@@ -185,6 +205,9 @@ class ChatSession:
                     recursion_limit=recursion_limit,
                 )
         except Exception as exc:
+            if self._is_non_retryable_error(exc):
+                console.print(f"[red]{exc}[/red]")
+                return None
             response = self._retry_with_fallback(
                 message,
                 exc,
@@ -235,6 +258,12 @@ class ChatSession:
         except Exception as exc2:
             console.print(f"[red]Error:[/red] {exc2}")
             return None
+
+    def _is_non_retryable_error(self, exc: Exception) -> bool:
+        if isinstance(exc, HardStopError):
+            return True
+        text = str(exc)
+        return any(marker in text for marker in _NON_RETRYABLE_ERRORS)
 
     def _run_plan_workflow(self, task: str) -> None:
         original_task = task or "(continue the current work)"

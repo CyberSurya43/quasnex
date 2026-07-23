@@ -7,10 +7,10 @@ from pathlib import Path
 from langchain_core.tools import BaseTool
 
 from . import fs_tools, kg_tools, memory_tools, scaffold_tools, shell_tools, skill_tools, web_tools
-from .confirm import confirm, set_confirmation_sink
+from .confirm import confirm, set_confirmation_sink, set_os_permission_sink
 from .tool_context import ToolContext
 
-__all__ = ["build_all_tools", "confirm", "set_confirmation_sink"]
+__all__ = ["build_all_tools", "confirm", "set_confirmation_sink", "set_os_permission_sink"]
 
 
 def build_all_tools(workspace_root: Path, project_dir: Path | None = None) -> list[BaseTool]:

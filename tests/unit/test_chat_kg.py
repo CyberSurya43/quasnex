@@ -124,6 +124,27 @@ class ChatKnowledgeGraphTests(unittest.TestCase):
 
             self.assertFalse(session._should_run_workflow("how does api fetching work?"))
 
+    def test_permission_hard_stop_is_not_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+
+            with patch.object(chat, "ModelRegistry", _DummyRegistry), patch.object(
+                chat, "CodingAgent", _DummyAgent
+            ), patch("ai_orchestrator.cli.commands.chat.Path.cwd", return_value=workspace):
+                session = chat.ChatSession()
+
+            self.assertTrue(
+                session._is_non_retryable_error(
+                    RuntimeError("HARD STOP: permission required. User approval is required.")
+                )
+            )
+            self.assertTrue(
+                session._is_non_retryable_error(
+                    RuntimeError("Stopped tool loop: edit_file was called too many times")
+                )
+            )
+            self.assertFalse(session._is_non_retryable_error(RuntimeError("provider timed out")))
+
 
 if __name__ == "__main__":
     unittest.main()
