@@ -14,13 +14,13 @@ import tomllib
 
 _DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 _DEFAULT_NVIDIA_MODELS = (
-    "openai/gpt-oss-120b",
-    "qwen/qwen3-next-80b-a3b-instruct",
-    "qwen/qwen2.5-coder-32b-instruct",
     "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "meta/llama-3.1-8b-instruct",
     "meta/llama-3.1-70b-instruct",
     "mistralai/mistral-nemotron",
     "deepseek-ai/deepseek-v4-flash",
+    "nvidia/nemotron-3-ultra-550b-a55b"
 )
 _DEFAULT_TEMPERATURE = 0.2
 _DEFAULT_MAX_RETRIES = 2
