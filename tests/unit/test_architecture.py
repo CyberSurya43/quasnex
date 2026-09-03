@@ -20,6 +20,10 @@ def _write_env(project_dir: Path) -> None:
                 "LIGHTNING_MODELS=qwen2.5-coder:14b,qwen2.5-coder:7b",
                 "NVIDIA_API_KEY=test-nvidia-key",
                 "NVIDIA_MODELS=openai/gpt-oss-120b,qwen/qwen3-next-80b-a3b-instruct,qwen/qwen2.5-coder-32b-instruct,openai/gpt-oss-20b",
+                "OPENROUTER_API_KEY=test-openrouter-key",
+                "OPENROUTER_MODELS=openrouter/auto,anthropic/claude-sonnet-4.5",
+                "OPENROUTER_SITE_URL=https://example.test",
+                "OPENROUTER_APP_NAME=ForgeFlow Tests",
             ]
         ),
         encoding="utf-8",
@@ -48,7 +52,26 @@ class ModelRegistryTests(unittest.TestCase):
 
             self.assertIn("lightning", available)
             self.assertIn("nvidia", available)
+            self.assertIn("openrouter", available)
             self.assertIn("openai/gpt-oss-20b", available["nvidia"])
+            self.assertIn("openrouter/auto", available["openrouter"])
+
+    def test_openrouter_provider_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+
+            provider = load_env(project_dir).providers["openrouter"]
+
+            self.assertEqual(provider.base_url, "https://openrouter.ai/api/v1")
+            self.assertEqual(provider.models[0], "openrouter/auto")
+            self.assertEqual(
+                dict(provider.default_headers),
+                {
+                    "HTTP-Referer": "https://example.test",
+                    "X-OpenRouter-Title": "ForgeFlow Tests",
+                },
+            )
 
     def test_visible_models_show_only_planner_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

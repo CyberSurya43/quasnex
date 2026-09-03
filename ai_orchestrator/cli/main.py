@@ -12,13 +12,14 @@ from .commands.chat import handle_chat
 from .commands.context import handle_context
 from .commands.plan import handle_plan
 from .commands.run import handle_run
+from .ui import APP_NAME, TAGLINE
 
 
 def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        prog="ai-orchestrator",
-        description="Plan, build, test, and deploy apps with a LangGraph-powered coding agent.",
+        prog="forgeflow",
+        description=f"{APP_NAME} — {TAGLINE} A LangGraph-powered coding agent.",
         formatter_class=RichHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)

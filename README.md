@@ -1,6 +1,6 @@
-# AI Orchestrator
+# ForgeFlow
 
-A CLI coding agent for planning, building, testing, and deploying apps —
+A rich CLI coding agent for planning, building, testing, and shipping apps —
 powered by your own hosted models instead of third-party CLI tools.
 
 ## Architecture
@@ -10,9 +10,10 @@ powered by your own hosted models instead of third-party CLI tools.
   - `lightning` — a self-hosted gateway (e.g. a Lightning AI GPU instance running vLLM/Ollama
     behind an OpenAI-compatible proxy)
   - `nvidia` — NVIDIA's NIM API (hosted open-source models)
+  - `openrouter` — OpenRouter's hosted gateway and model catalog
 
   Calls retry transient failures automatically; if the active provider errors out mid-chat,
-  the session falls back to the other configured provider and keeps going.
+  the session falls back to another configured provider and keeps going.
 - **Agent loop** — [LangGraph](https://langchain-ai.github.io/langgraph/)'s `create_react_agent`
   runs a tool-using loop with SQLite-backed conversation state (`.orchestrator/chat_state.sqlite`),
   so context persists across chat sessions per project.
@@ -25,7 +26,7 @@ powered by your own hosted models instead of third-party CLI tools.
   planning, repository/documentation work, verification, and deployment, while Lightning
   `qwen2.5-coder:14b` handles code generation and
   debugging. Override role picks in `.env` with values like
-  `PLANNER_MODEL=nvidia:openai/gpt-oss-120b` or `CODING_MODEL=lightning:qwen2.5-coder:14b`.
+  `PLANNER_MODEL=openrouter:openrouter/auto` or `CODING_MODEL=lightning:qwen2.5-coder:14b`.
   The chat UI shows only the planner/orchestrator model; internal routing still sees every
   configured provider model for role fallback.
 - **Knowledge graph + context resolver** — the project is indexed into
@@ -62,15 +63,44 @@ powered by your own hosted models instead of third-party CLI tools.
 cd ai_orchestrator
 pip install -e .
 
-# Copy your .env with LIGHTNING_*/NVIDIA_* credentials into the project root
+# Copy your .env with LIGHTNING_*/NVIDIA_*/OPENROUTER_* credentials into the project root
 cp .env.example .env  # then fill in your keys
 
-ai-orchestrator chat
+forgeflow chat
 ```
 
-`pip install -e .` registers the `ai-orchestrator` command (via the `[project.scripts]` entry
+### OpenRouter setup
+
+Create an OpenRouter API key, then add this to the `.env` in the project where
+you run the orchestrator:
+
+```dotenv
+DEFAULT_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-replace-me
+OPENROUTER_MODELS=openrouter/auto
+```
+
+List additional model slugs in `OPENROUTER_MODELS` as a comma-separated value.
+Every model used by `/model` or a capability override must be in that list:
+
+```dotenv
+OPENROUTER_MODELS=openrouter/auto,provider/model-slug
+PLANNER_MODEL=openrouter:openrouter/auto
+```
+
+Restart the chat after editing `.env`, then enter `/model` to choose from the
+numbered list.
+
+The optional `OPENROUTER_SITE_URL` and `OPENROUTER_APP_NAME` settings enable
+OpenRouter app attribution. In an existing REPL session, run:
+
+```text
+/model openrouter openrouter/auto
+```
+
+`pip install -e .` registers the `forgeflow` command (via the `[project.scripts]` entry
 point in `pyproject.toml`) on your PATH for as long as the environment it was installed into is
-active — no need to invoke it as `python -m ai_orchestrator` afterwards.
+active. The older `ai-orchestrator` executable remains available as a compatibility alias.
 
 ### Installing from a zip
 
@@ -78,14 +108,14 @@ To set this up on another machine (or share it) without cloning the repo, zip th
 parts and hand that off instead:
 
 ```bash
-zip -r ai-orchestrator.zip ai_orchestrator pyproject.toml README.md .env.example scripts \
+zip -r forgeflow.zip ai_orchestrator pyproject.toml README.md .env.example scripts \
   -x "*/__pycache__/*" "*.pyc"
 ```
 
 Then, wherever you want to use it:
 
 ```bash
-unzip ai-orchestrator.zip -d ai-orchestrator && cd ai-orchestrator
+unzip forgeflow.zip -d forgeflow && cd forgeflow
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 cp .env.example .env   # fill in your provider keys
@@ -105,8 +135,8 @@ does *not* need to live inside the project it's working on.
 ~/projects/todo/                # your actual project — orchestrator is never copied in here
   frontend/
   backend/
-  .venv/                        # any venv with ai-orchestrator installed (todo's own or shared)
-  .env                          # orchestrator's LIGHTNING_*/NVIDIA_* keys go here
+  .venv/                        # any venv with ForgeFlow installed (todo's own or shared)
+  .env                          # ForgeFlow provider keys and model lists go here
   .orchestrator/                # created automatically: knowledge graph + chat history
 ```
 
@@ -116,16 +146,16 @@ Steps:
 pip install -e ~/tools/ai_orchestrator          # once, into whichever venv you'll activate below
 cp ~/tools/ai_orchestrator/.env.example ~/projects/todo/.env   # then fill in your keys
 cd ~/projects/todo
-ai-orchestrator chat
+forgeflow chat
 ```
 
 Notes:
-- The orchestrator reads `.env` and writes `.orchestrator/` in whatever directory you launch
-  `ai-orchestrator chat` from — that's why `.env` belongs at the root of `todo/`, not inside
+- ForgeFlow reads `.env` and writes `.orchestrator/` in whatever directory you launch
+  `forgeflow chat` from — that's why `.env` belongs at the root of `todo/`, not inside
   `ai_orchestrator/`.
 - Don't pass `--project-dir` for an existing repo like this — that flag is for the separate
   `init`/`plan`/`run` scaffolding pipeline and points the agent at `<project-dir>/workspace/`
-  instead of the directory itself. Running `ai-orchestrator chat` with no flags from inside
+  instead of the directory itself. Running `forgeflow chat` with no flags from inside
   `todo/` operates on `todo/` directly (though in that mode the knowledge graph and chat
   history are rebuilt each session rather than cached to disk).
 
@@ -145,7 +175,7 @@ at the right files instead of exploring an unfamiliar codebase blind — see
 - **Manual rebuild from the CLI, without opening chat** — refresh the graph for a scaffolded
   project as part of `plan`:
   ```bash
-  ai-orchestrator plan ./my-app
+  forgeflow plan ./my-app
   ```
 - **Let the agent trigger it mid-conversation** — the agent has a `build_knowledge_graph` tool
   it can call itself (e.g. after you tell it you added a bunch of new files), and `kg_stats` /
@@ -157,7 +187,7 @@ it, and — per [Using it in an existing project](#using-it-in-an-existing-proje
 points the agent at `<project-dir>/workspace/`, not the directory itself, so it's not a drop-in
 flag for an arbitrary existing repo laid out like `frontend/`/`backend/`. Two ways to get a
 persisted graph for a project like that today:
-- Run plain `ai-orchestrator chat` from the project root and use `/kg rebuild` for a fresh index
+- Run plain `forgeflow chat` from the project root and use `/kg rebuild` for a fresh index
   within that session — it stays fast for the rest of the session, but isn't cached to disk, so
   the next session rebuilds it again from scratch.
 - Or lay the project out to match the scaffolding convention (actual code under a `workspace/`
@@ -166,19 +196,21 @@ persisted graph for a project like that today:
 ## Commands
 
 ```bash
-ai-orchestrator chat                          # interactive chat with the coding agent
-ai-orchestrator init ./my-app --name my-app    # scaffold a new orchestration project
-ai-orchestrator plan ./my-app                  # generate stage task packets + refresh the KG
-ai-orchestrator run ./my-app --execute          # run the multi-stage build pipeline
-ai-orchestrator context show ./my-app          # inspect shared project context
+forgeflow chat                          # interactive chat with the coding agent
+forgeflow init ./my-app --name my-app    # scaffold a new orchestration project
+forgeflow plan ./my-app                  # generate stage task packets + refresh the KG
+forgeflow run ./my-app --execute          # run the multi-stage build pipeline
+forgeflow context show ./my-app          # inspect shared project context
 ```
 
 ## Inside the chat REPL
 
 ```
-/model                          show the planner/orchestrator model
+/model                          choose from a numbered list loaded from *_MODELS in .env
+/model list                     list all configured providers and models
 /model nvidia openai/gpt-oss-20b  switch provider + model
-/providers                      show the planner/orchestrator model
+/model openrouter openrouter/auto   switch to OpenRouter's auto router
+/providers                      list all configured providers and models
 /tools                          list tools available to the agent
 /skills                         list available skills
 /plan <task>                    run analyze -> implement -> verify

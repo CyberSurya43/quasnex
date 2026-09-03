@@ -13,6 +13,8 @@ import tomllib
 # -----------------------------------------------------------------------
 
 _DEFAULT_NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+_DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+_DEFAULT_OPENROUTER_MODELS = ("openrouter/auto",)
 _DEFAULT_NVIDIA_MODELS = (
     "openai/gpt-oss-20b",
     "openai/gpt-oss-120b",
@@ -44,6 +46,7 @@ class ProviderConfig:
     models: tuple[str, ...]
     temperature: float = _DEFAULT_TEMPERATURE
     max_retries: int = _DEFAULT_MAX_RETRIES
+    default_headers: tuple[tuple[str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -267,6 +270,28 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
             models=models or _DEFAULT_NVIDIA_MODELS,
             temperature=_get_float(env_vars, "NVIDIA_TEMPERATURE", default_temperature),
             max_retries=_get_int(env_vars, "NVIDIA_MAX_RETRIES", default_max_retries),
+        )
+
+    openrouter_key = _get(env_vars, "OPENROUTER_API_KEY")
+    if openrouter_key:
+        models = tuple(
+            m.strip() for m in _get(env_vars, "OPENROUTER_MODELS", "").split(",") if m.strip()
+        )
+        headers: list[tuple[str, str]] = []
+        site_url = _get(env_vars, "OPENROUTER_SITE_URL")
+        app_name = _get(env_vars, "OPENROUTER_APP_NAME")
+        if site_url:
+            headers.append(("HTTP-Referer", site_url))
+        if app_name:
+            headers.append(("X-OpenRouter-Title", app_name))
+        providers["openrouter"] = ProviderConfig(
+            name="openrouter",
+            base_url=_get(env_vars, "OPENROUTER_BASE_URL", _DEFAULT_OPENROUTER_BASE_URL),
+            api_key=openrouter_key,
+            models=models or _DEFAULT_OPENROUTER_MODELS,
+            temperature=_get_float(env_vars, "OPENROUTER_TEMPERATURE", default_temperature),
+            max_retries=_get_int(env_vars, "OPENROUTER_MAX_RETRIES", default_max_retries),
+            default_headers=tuple(headers),
         )
 
     default_provider = _get(env_vars, "DEFAULT_PROVIDER", next(iter(providers), "lightning"))

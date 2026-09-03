@@ -1,4 +1,4 @@
-"""Portable orchestration framework for LangChain/LangGraph-powered app builds."""
+"""ForgeFlow: portable LangChain/LangGraph-powered application delivery."""
 
 from .config import load_env, EnvironmentConfig
 from .core import Orchestrator, CodingAgent

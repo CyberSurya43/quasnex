@@ -15,25 +15,34 @@ class _DummyRegistry:
 
     def __init__(self, project_dir: Path | None = None):
         self.project_dir = project_dir
+        self.active = ("dummy", "model")
 
     def current(self) -> tuple[str, str]:
-        return ("dummy", "model")
+        return self.active
 
     def switch_role(self, role: str) -> tuple[str, str]:
         self.switched_roles.append(role)
-        return ("dummy", "model")
+        self.active = ("dummy", "model")
+        return self.active
 
     def role_candidates(self, role: str) -> tuple[ModelRoute, ...]:
         return (ModelRoute("dummy", "model"),)
 
     def switch(self, provider_name: str, model_name: str | None = None) -> tuple[str, str]:
-        return (provider_name, model_name or "model")
+        self.active = (provider_name, model_name or "model")
+        return self.active
 
     def planner_model(self) -> ModelRoute:
         return ModelRoute("dummy", "model")
 
     def list_visible_models(self) -> dict[str, tuple[str, ...]]:
         return {"dummy": ("model",)}
+
+    def list_available(self) -> dict[str, tuple[str, ...]]:
+        return {
+            "dummy": ("model",),
+            "openrouter": ("openrouter/auto", "provider/coding-model"),
+        }
 
 
 class _DummyAgent:
@@ -123,6 +132,34 @@ class ChatKnowledgeGraphTests(unittest.TestCase):
                 session = chat.ChatSession()
 
             self.assertFalse(session._should_run_workflow("how does api fetching work?"))
+
+    def test_model_command_selects_from_configured_env_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+
+            with patch.object(chat, "ModelRegistry", _DummyRegistry), patch.object(
+                chat, "CodingAgent", _DummyAgent
+            ), patch("ai_orchestrator.cli.commands.chat.Path.cwd", return_value=workspace), patch.object(
+                chat.console, "input", return_value="3"
+            ):
+                session = chat.ChatSession()
+                should_exit = session._handle_command("/model")
+
+            self.assertFalse(should_exit)
+            self.assertEqual(session.registry.current(), ("openrouter", "provider/coding-model"))
+
+    def test_plain_chat_preserves_interactively_selected_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+
+            with patch.object(chat, "ModelRegistry", _DummyRegistry), patch.object(
+                chat, "CodingAgent", _DummyAgent
+            ), patch("ai_orchestrator.cli.commands.chat.Path.cwd", return_value=workspace):
+                session = chat.ChatSession()
+                session.registry.switch("openrouter", "openrouter/auto")
+                session._send("hello", preserve_active=True)
+
+            self.assertEqual(session.registry.current(), ("openrouter", "openrouter/auto"))
 
     def test_permission_hard_stop_is_not_retryable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

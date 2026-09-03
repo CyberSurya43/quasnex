@@ -46,7 +46,7 @@ class ModelRegistry:
         if not self.env_config.providers:
             raise RuntimeError(
                 "No model providers configured. Set LIGHTNING_BASE_URL/LIGHTNING_API_KEY "
-                "and/or NVIDIA_API_KEY in .env."
+                "and/or NVIDIA_API_KEY or OPENROUTER_API_KEY in .env."
             )
 
         saved = ctx_store.load(self.project_dir).get("user_preferences", {}).get("model_settings", {})
