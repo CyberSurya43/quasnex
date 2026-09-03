@@ -5,22 +5,40 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from rich import box
+from rich.markup import escape
+from rich.syntax import Syntax
+from rich.table import Table
+
 from ai_orchestrator.core import context as ctx_store
+from ai_orchestrator.cli.ui import console, print_brand_header
 
 
 def handle_context(args) -> None:
     """Handle the context command."""
     project_dir = args.project_dir.resolve()
-    
+    print_brand_header(subtitle="Inspect and shape shared project context")
+
     if args.ctx_command == "set":
         for pair in args.pairs:
             if "=" not in pair:
-                print(f"Skipping malformed pair (expected KEY=VALUE): {pair!r}")
+                console.print(
+                    f"[forge.warning]Skipped malformed pair[/forge.warning] "
+                    f"[forge.muted](expected KEY=VALUE): {escape(pair)!r}[/forge.muted]"
+                )
                 continue
             key, _, value = pair.partition("=")
             ctx_store.set_user_preference(project_dir, key.strip(), value.strip())
-            print(f"Set preference: {key.strip()} = {value.strip()}")
-    
+            console.print(
+                f"[forge.success]✓ Preference saved[/forge.success]  "
+                f"[bold]{escape(key.strip())}[/bold] = {escape(value.strip())}"
+            )
+
     elif args.ctx_command == "show":
         data = ctx_store.load(project_dir)
-        print(json.dumps(data, indent=2))
+        table = Table(box=box.ROUNDED, border_style="bright_cyan", show_header=False)
+        table.add_column("Project", style="forge.muted")
+        table.add_column(style="forge.path")
+        table.add_row("Context store", str(project_dir / ".orchestrator" / "context.json"))
+        console.print(table)
+        console.print(Syntax(json.dumps(data, indent=2), "json", theme="monokai", word_wrap=True))

@@ -6,10 +6,13 @@ from contextlib import contextmanager
 from pathlib import Path
 import re
 
-from rich.console import Console
+from rich import box
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm
+from rich.rule import Rule
+from rich.table import Table
+from rich.text import Text
 
 from ai_orchestrator import knowledge_graph as kg
 from ai_orchestrator.agent_tools import set_confirmation_sink
@@ -17,8 +20,7 @@ from ai_orchestrator.agent_tools.confirm import set_os_permission_sink
 from ai_orchestrator.core import CodingAgent, HardStopError, MIN_RECURSION_LIMIT
 from ai_orchestrator.llm import ModelRegistry, UnknownModelError, UnknownProviderError
 from ai_orchestrator.skills import list_skills, load_skill
-
-console = Console()
+from ai_orchestrator.cli.ui import APP_NAME, TAGLINE, console
 
 # Tracks the active "thinking..." spinner (if any) so a confirmation prompt
 # fired mid-turn (edit_file/write_file/delete_file) can pause it first —
@@ -78,24 +80,21 @@ _PLAN_WORKFLOW = (
     ),
 )
 
-HELP_TEXT = """\
-[bold]Slash commands[/bold]
-  /model                      show the planner/orchestrator model
-  /model <provider> [model]   switch the active provider (and optionally model)
-  /providers                  show the planner/orchestrator model
-  /tools                      list tools available to the agent
-  /skills                     list available skills (plan/build/test/deploy/debug)
-  /kg                         show knowledge graph stats
-  /kg rebuild                 force a full re-index of the project
-  /plan <task>                run analyze -> implement -> verify
-  /build <task>                work through <task> following the Build skill
-  /test [task]                run/write tests following the Test skill
-  /deploy [task]               prepare a deployment following the Deploy skill
-  /debug <task>                investigate a bug following the Debug skill
-  /clear                       start a fresh conversation thread
-  /help                        show this help
-  /exit, /quit                 end the session
-"""
+_HELP_COMMANDS = (
+    ("Models", "/model", "Choose from models configured in .env"),
+    ("Models", "/model list", "List all configured models"),
+    ("Models", "/model <provider> [model]", "Switch directly"),
+    ("Workspace", "/kg [rebuild]", "Inspect or rebuild the knowledge graph"),
+    ("Workspace", "/tools", "List agent tools"),
+    ("Workspace", "/skills", "List available workflows"),
+    ("Workflows", "/plan <task>", "Analyze, implement, and verify"),
+    ("Workflows", "/build <task>", "Build with the coding workflow"),
+    ("Workflows", "/debug <task>", "Investigate and fix a bug"),
+    ("Workflows", "/test [task]", "Run or write tests"),
+    ("Workflows", "/deploy [task]", "Prepare a deployment"),
+    ("Session", "/clear", "Start a fresh conversation"),
+    ("Session", "/exit", "Close ForgeFlow"),
+)
 
 
 def _confirm_sink(action: str, detail: str) -> bool:
@@ -143,29 +142,39 @@ class ChatSession:
     def run(self) -> None:
         planner = self.registry.planner_model()
 
-        kg_line = ""
         with console.status("[dim]indexing project...[/dim]", spinner="dots"):
             graph = kg.build_or_update(self.workspace_root, self.kg_store_dir)
-        if graph["files"]:
-            kg_line = (
-                f"Knowledge graph: [green]{len(graph['files'])}[/green] files, "
-                f"[green]{len(graph['edges'])}[/green] import edges\n"
-            )
 
+        overview = Table.grid(padding=(0, 2))
+        overview.add_column(style="forge.muted", justify="right")
+        overview.add_column()
+        overview.add_row("MODEL", Text(f"{planner.provider} / {planner.model}", style="green"))
+        overview.add_row("WORKSPACE", Text(str(self.workspace_root), style="forge.path"))
+        if graph["files"]:
+            overview.add_row(
+                "INDEX",
+                Text(f"{len(graph['files'])} files  •  {len(graph['edges'])} import edges", style="cyan"),
+            )
+        else:
+            overview.add_row("INDEX", Text("No source files indexed", style="forge.warning"))
+        overview.add_row("COMMANDS", Text("/help  •  /model  •  /exit", style="bright_magenta"))
+
+        console.print()
         console.print(
-            Panel.fit(
-                f"[bold cyan]AI Orchestrator[/bold cyan]\n"
-                f"Planner model: [green]{planner.provider}[/green] / [green]{planner.model}[/green]\n"
-                f"Workspace: [dim]{self.workspace_root}[/dim]\n"
-                f"{kg_line}"
-                f"Type [bold]/help[/bold] for commands, [bold]/exit[/bold] to quit.",
-                border_style="cyan",
+            Panel(
+                overview,
+                title=f"[forge.brand]◆ {APP_NAME.upper()}[/forge.brand]",
+                subtitle=f"[forge.muted]{TAGLINE}[/forge.muted]",
+                border_style="bright_cyan",
+                padding=(1, 3),
             )
         )
 
         while True:
             try:
-                user_input = console.input("\n[bold blue]you>[/bold blue] ").strip()
+                user_input = console.input(
+                    "\n[forge.brand]you[/forge.brand] [forge.accent]›[/forge.accent] "
+                ).strip()
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]Goodbye![/dim]")
                 break
@@ -181,7 +190,9 @@ class ChatSession:
             if self._should_run_workflow(user_input):
                 self._run_plan_workflow(user_input)
             else:
-                self._send(user_input)
+                # A model selected with /model remains active for ordinary chat.
+                # Capability workflows still select their configured role model.
+                self._send(user_input, preserve_active=True)
 
     # ------------------------------------------------------------------
 
@@ -190,12 +201,15 @@ class ChatSession:
         message: str,
         model_role: str = "planner",
         recursion_limit: int = _DEFAULT_RECURSION_LIMIT,
+        *,
+        preserve_active: bool = False,
     ) -> str | None:
         def on_tool_call(name: str, args: dict) -> None:
             console.print(f"  [dim]tool:[/dim] [magenta]{name}[/magenta]({args})")
 
         try:
-            self.registry.switch_role(model_role)
+            if not preserve_active:
+                self.registry.switch_role(model_role)
             self.agent.rebuild()
             with _thinking_status():
                 response = self.agent.send(
@@ -218,7 +232,15 @@ class ChatSession:
                 return None
 
         self._print_verification()
-        console.print(Markdown(response))
+        console.print(
+            Panel(
+                Markdown(response),
+                title=f"[forge.brand]{APP_NAME}[/forge.brand]",
+                title_align="left",
+                border_style="bright_cyan",
+                padding=(1, 2),
+            )
+        )
         return response
 
     def _print_verification(self) -> None:
@@ -287,7 +309,13 @@ class ChatSession:
         original_task = task or "(continue the current work)"
         context = f"Original user task:\n{original_task}"
         for index, (label, role, instruction) in enumerate(_PLAN_WORKFLOW, start=1):
-            console.print(f"\n[bold cyan]{index}. {label}[/bold cyan] [dim]({role})[/dim]")
+            console.print(
+                Rule(
+                    f"[forge.brand]{index}. {label}[/forge.brand] [forge.muted]{role}[/forge.muted]",
+                    style="bright_cyan",
+                    align="left",
+                )
+            )
             message = (
                 f"{instruction}\n\n"
                 f"Original user task for KG resolution:\n{original_task}\n\n"
@@ -321,7 +349,7 @@ class ChatSession:
             return True
 
         if cmd == "/help":
-            console.print(HELP_TEXT)
+            self._print_help()
             return False
 
         if cmd == "/clear":
@@ -372,6 +400,9 @@ class ChatSession:
 
         if cmd == "/model":
             if len(parts) == 1:
+                self._select_model_interactively()
+                return False
+            if parts[1].lower() == "list":
                 self._print_model_status()
                 return False
             provider_name = parts[1]
@@ -389,21 +420,90 @@ class ChatSession:
         return False
 
     def _print_model_status(self) -> None:
+        current = self.registry.current()
         route = self.registry.planner_model()
-        console.print(
-            f"Planner/orchestrator: [green]{route.provider}[/green] / [green]{route.model}[/green]"
+        table = Table(
+            title="Models configured in .env",
+            title_style="forge.brand",
+            box=box.ROUNDED,
+            border_style="bright_cyan",
+            header_style="bold bright_magenta",
+            show_lines=False,
         )
-        console.print("Visible model:")
-        for provider_name, models in self.registry.list_visible_models().items():
-            console.print(f"  [bold]{provider_name}[/bold]")
+        table.add_column("#", justify="right", style="cyan", width=4)
+        table.add_column("Provider", style="bold")
+        table.add_column("Model", overflow="fold")
+        table.add_column("Status", justify="center")
+        index = 1
+        for provider_name, models in self.registry.list_available().items():
             for model_name in models:
-                active = (
-                    " [green](orchestrator)[/green]"
-                    if (provider_name, model_name) == (route.provider, route.model)
-                    else ""
+                status = (
+                    "[forge.success]● active[/forge.success]"
+                    if (provider_name, model_name) == current
+                    else "[forge.muted]available[/forge.muted]"
                 )
-                console.print(f"    - {model_name}{active}")
-        console.print("Switch with: [bold]/model <provider> [model][/bold]")
+                table.add_row(str(index), Text(provider_name), Text(model_name), status)
+                index += 1
+        console.print(table)
+        console.print(
+            f"[forge.muted]Planner route:[/forge.muted] {route.provider} / {route.model}  "
+            "[forge.muted]•[/forge.muted]  Choose with [bold]/model[/bold]"
+        )
+
+    def _print_help(self) -> None:
+        table = Table(
+            title=f"{APP_NAME} command palette",
+            title_style="forge.brand",
+            box=box.ROUNDED,
+            border_style="bright_cyan",
+            header_style="bold bright_magenta",
+            expand=False,
+        )
+        table.add_column("Group", style="forge.muted", no_wrap=True)
+        table.add_column("Command", style="bold cyan", no_wrap=True)
+        table.add_column("What it does")
+        previous_group = None
+        for group, command, description in _HELP_COMMANDS:
+            table.add_row(group if group != previous_group else "", command, description)
+            previous_group = group
+        console.print(table)
+
+    def _select_model_interactively(self) -> None:
+        choices = [
+            (provider_name, model_name)
+            for provider_name, models in self.registry.list_available().items()
+            for model_name in models
+        ]
+        self._print_model_status()
+        if not choices:
+            console.print("[red]No models are configured.[/red]")
+            return
+
+        try:
+            raw_choice = console.input(
+                f"Select model [bold](1-{len(choices)})[/bold] "
+                "([dim]Enter to cancel[/dim]): "
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Model selection cancelled.[/dim]")
+            return
+        if not raw_choice:
+            console.print("[dim]Model selection cancelled.[/dim]")
+            return
+        try:
+            choice_index = int(raw_choice) - 1
+        except ValueError:
+            choice_index = -1
+        if choice_index not in range(len(choices)):
+            console.print(
+                f"[red]Invalid selection.[/red] Enter a number from 1 to {len(choices)}."
+            )
+            return
+
+        provider, model = choices[choice_index]
+        self.registry.switch(provider, model)
+        self.agent.rebuild()
+        console.print(f"Switched to [green]{provider}[/green] / [green]{model}[/green]")
 
 
 def handle_chat(project_dir: Path | None = None) -> None:

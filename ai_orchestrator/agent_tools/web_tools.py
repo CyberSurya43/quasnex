@@ -52,7 +52,7 @@ def fetch_url(url: str) -> str:
             url,
             timeout=_FETCH_TIMEOUT,
             follow_redirects=True,
-            headers={"User-Agent": "ai-orchestrator/0.1 (+knowledge-gateway)"},
+            headers={"User-Agent": "forgeflow/0.2 (+knowledge-gateway)"},
         )
         response.raise_for_status()
     except httpx.HTTPError as exc:

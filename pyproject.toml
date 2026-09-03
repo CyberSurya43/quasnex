@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ai-orchestrator"
+name = "forgeflow"
 version = "0.2.0"
-description = "LangGraph-powered CLI coding agent for planning, building, testing, and deploying apps against your own hosted models."
+description = "ForgeFlow: a LangGraph-powered CLI coding agent for planning, building, testing, and shipping apps."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,6 +24,8 @@ dependencies = [
 dev = ["pytest"]
 
 [project.scripts]
+forgeflow = "ai_orchestrator.cli:main"
+# Backward-compatible executable name for existing installations and scripts.
 ai-orchestrator = "ai_orchestrator.cli:main"
 
 [tool.setuptools.packages.find]
