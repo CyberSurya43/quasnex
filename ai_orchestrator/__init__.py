@@ -1,4 +1,4 @@
-"""ForgeFlow: portable LangChain/LangGraph-powered application delivery."""
+"""Cosnex: portable LangChain/LangGraph-powered application delivery."""
 
 from .config import load_env, EnvironmentConfig
 from .core import Orchestrator, CodingAgent

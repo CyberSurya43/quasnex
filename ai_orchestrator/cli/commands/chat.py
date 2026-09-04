@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 
 from rich import box
+from rich.columns import Columns
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.prompt import Confirm
@@ -20,7 +21,14 @@ from ai_orchestrator.agent_tools.confirm import set_os_permission_sink
 from ai_orchestrator.core import CodingAgent, HardStopError, MIN_RECURSION_LIMIT
 from ai_orchestrator.llm import ModelRegistry, UnknownModelError, UnknownProviderError
 from ai_orchestrator.skills import list_skills, load_skill
-from ai_orchestrator.cli.ui import APP_NAME, TAGLINE, console
+from ai_orchestrator.cli.ui import (
+    APP_NAME,
+    TAGLINE,
+    brand_lockup,
+    console,
+    cosnex_indexing_animation,
+    metadata_chip,
+)
 
 # Tracks the active "thinking..." spinner (if any) so a confirmation prompt
 # fired mid-turn (edit_file/write_file/delete_file) can pause it first —
@@ -33,7 +41,11 @@ _active_status = None
 @contextmanager
 def _thinking_status():
     global _active_status
-    status = console.status("[dim]thinking...[/dim]", spinner="dots")
+    status = console.status(
+        "[cosnex.subtle]Thinking[/cosnex.subtle]",
+        spinner="dots",
+        spinner_style="cosnex.violet",
+    )
     status.start()
     _active_status = status
     try:
@@ -93,7 +105,7 @@ _HELP_COMMANDS = (
     ("Workflows", "/test [task]", "Run or write tests"),
     ("Workflows", "/deploy [task]", "Prepare a deployment"),
     ("Session", "/clear", "Start a fresh conversation"),
-    ("Session", "/exit", "Close ForgeFlow"),
+    ("Session", "/exit", "Close Cosnex"),
 )
 
 
@@ -142,38 +154,43 @@ class ChatSession:
     def run(self) -> None:
         planner = self.registry.planner_model()
 
-        with console.status("[dim]indexing project...[/dim]", spinner="dots"):
+        with cosnex_indexing_animation():
             graph = kg.build_or_update(self.workspace_root, self.kg_store_dir)
 
-        overview = Table.grid(padding=(0, 2))
-        overview.add_column(style="forge.muted", justify="right")
-        overview.add_column()
-        overview.add_row("MODEL", Text(f"{planner.provider} / {planner.model}", style="green"))
-        overview.add_row("WORKSPACE", Text(str(self.workspace_root), style="forge.path"))
-        if graph["files"]:
-            overview.add_row(
-                "INDEX",
-                Text(f"{len(graph['files'])} files  •  {len(graph['edges'])} import edges", style="cyan"),
-            )
-        else:
-            overview.add_row("INDEX", Text("No source files indexed", style="forge.warning"))
-        overview.add_row("COMMANDS", Text("/help  •  /model  •  /exit", style="bright_magenta"))
-
         console.print()
+        console.print(Rule(brand_lockup(), style="cosnex.border", align="left"))
+        console.print(Text(f"  {TAGLINE}", style="cosnex.subtle"))
+        console.print()
+        index_summary = (
+            f"{len(graph['files'])} files · {len(graph['edges'])} edges"
+            if graph["files"]
+            else "empty"
+        )
+        chips = Text.assemble(
+            metadata_chip("model", f"{planner.provider}/{planner.model}"),
+            "  ",
+            metadata_chip("index", index_summary, accent="#a78bfa"),
+        )
+        console.print(chips)
+        console.print(Text.assemble(
+            ("  workspace  ", "cosnex.muted"),
+            (str(self.workspace_root), "cosnex.path"),
+        ))
         console.print(
-            Panel(
-                overview,
-                title=f"[forge.brand]◆ {APP_NAME.upper()}[/forge.brand]",
-                subtitle=f"[forge.muted]{TAGLINE}[/forge.muted]",
-                border_style="bright_cyan",
-                padding=(1, 3),
+            Text.assemble(
+                ("  quick actions  ", "cosnex.muted"),
+                ("/help", "cosnex.accent"),
+                ("   ", ""),
+                ("/model", "cosnex.violet"),
+                ("   ", ""),
+                ("/exit", "cosnex.subtle"),
             )
         )
 
         while True:
             try:
                 user_input = console.input(
-                    "\n[forge.brand]you[/forge.brand] [forge.accent]›[/forge.accent] "
+                    "\n[cosnex.muted]you[/cosnex.muted] [cosnex.accent]❯[/cosnex.accent] "
                 ).strip()
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]Goodbye![/dim]")
@@ -205,7 +222,16 @@ class ChatSession:
         preserve_active: bool = False,
     ) -> str | None:
         def on_tool_call(name: str, args: dict) -> None:
-            console.print(f"  [dim]tool:[/dim] [magenta]{name}[/magenta]({args})")
+            preview = str(args)
+            if len(preview) > 100:
+                preview = f"{preview[:97]}..."
+            console.print(
+                Text.assemble(
+                    (" TOOL ", "bold #0b1120 on #a78bfa"),
+                    (f" {name} ", "cosnex.violet"),
+                    (preview, "cosnex.muted"),
+                )
+            )
 
         try:
             if not preserve_active:
@@ -235,10 +261,11 @@ class ChatSession:
         console.print(
             Panel(
                 Markdown(response),
-                title=f"[forge.brand]{APP_NAME}[/forge.brand]",
+                title=f"[cosnex.accent]✦[/cosnex.accent] [cosnex.brand]{APP_NAME}[/cosnex.brand]",
                 title_align="left",
-                border_style="bright_cyan",
-                padding=(1, 2),
+                border_style="cosnex.border",
+                box=box.MINIMAL,
+                padding=(0, 2),
             )
         )
         return response
@@ -249,16 +276,22 @@ class ChatSession:
             return
         if not verification.attempted:
             console.print(
-                "[dim]No test command detected for this project — changes were not auto-verified.[/dim]"
+                "[cosnex.muted]○  No test command detected; changes were not auto-verified.[/cosnex.muted]"
             )
         elif not verification.ran:
-            console.print(f"[dim]Verification skipped: user declined to run `{verification.command}`.[/dim]")
+            console.print(
+                f"[cosnex.warning]○  Verification skipped[/cosnex.warning]  "
+                f"[cosnex.muted]{verification.command}[/cosnex.muted]"
+            )
         elif verification.passed:
-            console.print(f"[green]✓ Verified:[/green] `{verification.command}` passed.")
+            console.print(
+                f"[cosnex.success]●  Verified[/cosnex.success]  "
+                f"[cosnex.subtle]{verification.command}[/cosnex.subtle]"
+            )
         else:
             console.print(
-                f"[red]✗ Verification failed:[/red] `{verification.command}` still failing "
-                "after auto-fix attempts."
+                f"[cosnex.error]●  Verification failed[/cosnex.error]  "
+                f"[cosnex.subtle]{verification.command} is still failing after auto-fix attempts.[/cosnex.subtle]"
             )
 
     def _retry_with_fallback(
@@ -311,8 +344,10 @@ class ChatSession:
         for index, (label, role, instruction) in enumerate(_PLAN_WORKFLOW, start=1):
             console.print(
                 Rule(
-                    f"[forge.brand]{index}. {label}[/forge.brand] [forge.muted]{role}[/forge.muted]",
-                    style="bright_cyan",
+                    f"[cosnex.accent]0{index}[/cosnex.accent]  "
+                    f"[cosnex.brand]{label}[/cosnex.brand]  "
+                    f"[cosnex.muted]{role}[/cosnex.muted]",
+                    style="cosnex.border",
                     align="left",
                 )
             )
@@ -354,12 +389,11 @@ class ChatSession:
 
         if cmd == "/clear":
             self.agent.clear_history()
-            console.print("[dim]Started a fresh conversation thread.[/dim]")
+            console.print("[cosnex.success]●[/cosnex.success]  Fresh conversation started")
             return False
 
         if cmd == "/tools":
-            for name in self.agent.list_tools():
-                console.print(f"  - {name}")
+            self._print_collection("TOOLS", self.agent.list_tools())
             return False
 
         if cmd == "/providers":
@@ -367,13 +401,12 @@ class ChatSession:
             return False
 
         if cmd == "/skills":
-            for name in list_skills():
-                console.print(f"  - {name}")
+            self._print_collection("WORKFLOWS", list_skills())
             return False
 
         if cmd == "/kg":
             if len(parts) > 1 and parts[1] == "rebuild":
-                with console.status("[dim]re-indexing...[/dim]", spinner="dots"):
+                with cosnex_indexing_animation():
                     graph = kg.build_or_update(self.workspace_root, None)  # bypass cache
                     kg.save_graph(self.kg_store_dir, graph)
             else:
@@ -382,8 +415,13 @@ class ChatSession:
                     console.print("No knowledge graph yet — run [bold]/kg rebuild[/bold].")
                     return False
             console.print(
-                f"{len(graph['files'])} files, {len(graph['edges'])} import edges "
-                f"(root: {graph['root']})"
+                Text.assemble(
+                    metadata_chip("files", str(len(graph["files"]))),
+                    "  ",
+                    metadata_chip("edges", str(len(graph["edges"])), accent="#a78bfa"),
+                    "  ",
+                    (str(graph["root"]), "cosnex.path"),
+                )
             )
             return False
 
@@ -413,7 +451,7 @@ class ChatSession:
                 console.print(f"[red]Error:[/red] {exc}")
                 return False
             self.agent.rebuild()
-            console.print(f"Switched to [green]{provider}[/green] / [green]{model}[/green]")
+            console.print(metadata_chip("active", f"{provider}/{model}", accent="#34d399"))
             return False
 
         console.print(f"[red]Unknown command:[/red] {cmd}. Type /help for a list.")
@@ -423,14 +461,16 @@ class ChatSession:
         current = self.registry.current()
         route = self.registry.planner_model()
         table = Table(
-            title="Models configured in .env",
-            title_style="forge.brand",
-            box=box.ROUNDED,
-            border_style="bright_cyan",
-            header_style="bold bright_magenta",
+            title="MODEL REGISTRY",
+            title_style="cosnex.brand",
+            box=box.SIMPLE_HEAVY,
+            border_style="cosnex.border",
+            header_style="cosnex.muted",
             show_lines=False,
+            row_styles=("", "#cbd5e1"),
+            pad_edge=False,
         )
-        table.add_column("#", justify="right", style="cyan", width=4)
+        table.add_column("#", justify="right", style="cosnex.accent", width=3)
         table.add_column("Provider", style="bold")
         table.add_column("Model", overflow="fold")
         table.add_column("Status", justify="center")
@@ -438,28 +478,29 @@ class ChatSession:
         for provider_name, models in self.registry.list_available().items():
             for model_name in models:
                 status = (
-                    "[forge.success]● active[/forge.success]"
+                    "[cosnex.success]● active[/cosnex.success]"
                     if (provider_name, model_name) == current
-                    else "[forge.muted]available[/forge.muted]"
+                    else "[cosnex.muted]available[/cosnex.muted]"
                 )
                 table.add_row(str(index), Text(provider_name), Text(model_name), status)
                 index += 1
         console.print(table)
         console.print(
-            f"[forge.muted]Planner route:[/forge.muted] {route.provider} / {route.model}  "
-            "[forge.muted]•[/forge.muted]  Choose with [bold]/model[/bold]"
+            f"[cosnex.muted]Planner route:[/cosnex.muted] {route.provider} / {route.model}  "
+            "[cosnex.muted]•[/cosnex.muted]  Choose with [bold]/model[/bold]"
         )
 
     def _print_help(self) -> None:
         table = Table(
-            title=f"{APP_NAME} command palette",
-            title_style="forge.brand",
-            box=box.ROUNDED,
-            border_style="bright_cyan",
-            header_style="bold bright_magenta",
+            title="COMMAND PALETTE",
+            title_style="cosnex.brand",
+            box=box.SIMPLE_HEAVY,
+            border_style="cosnex.border",
+            header_style="cosnex.muted",
             expand=False,
+            pad_edge=False,
         )
-        table.add_column("Group", style="forge.muted", no_wrap=True)
+        table.add_column("Group", style="cosnex.muted", no_wrap=True)
         table.add_column("Command", style="bold cyan", no_wrap=True)
         table.add_column("What it does")
         previous_group = None
@@ -467,6 +508,11 @@ class ChatSession:
             table.add_row(group if group != previous_group else "", command, description)
             previous_group = group
         console.print(table)
+
+    def _print_collection(self, title: str, items) -> None:
+        console.print(Rule(f"[cosnex.brand]{title}[/cosnex.brand]", style="cosnex.border"))
+        cards = [Text(f" {name} ", style="#cbd5e1 on #1e293b") for name in items]
+        console.print(Columns(cards, padding=(0, 1), equal=False, expand=False))
 
     def _select_model_interactively(self) -> None:
         choices = [
@@ -503,7 +549,7 @@ class ChatSession:
         provider, model = choices[choice_index]
         self.registry.switch(provider, model)
         self.agent.rebuild()
-        console.print(f"Switched to [green]{provider}[/green] / [green]{model}[/green]")
+        console.print(metadata_chip("active", f"{provider}/{model}", accent="#34d399"))
 
 
 def handle_chat(project_dir: Path | None = None) -> None:
