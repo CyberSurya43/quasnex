@@ -1,7 +1,15 @@
-# ForgeFlow
+# Cosnex
 
 A rich CLI coding agent for planning, building, testing, and shipping apps —
 powered by your own hosted models instead of third-party CLI tools.
+
+`Cosnex` combines **Cosmos** and **Nexus**. Its terminal mark, `◉─✦─◉`, pairs a
+star with connected nodes; the animated version maps your repository cosmos
+into a navigable code nexus whenever chat indexing starts.
+
+The terminal UI uses a compact developer-tool layout with cyan/violet status
+chips, lightweight separators, a command palette, model registry, animated
+progress states, and Markdown response cards that adapt to the terminal width.
 
 ## Architecture
 
@@ -66,7 +74,7 @@ pip install -e .
 # Copy your .env with LIGHTNING_*/NVIDIA_*/OPENROUTER_* credentials into the project root
 cp .env.example .env  # then fill in your keys
 
-forgeflow chat
+cosnex chat
 ```
 
 ### OpenRouter setup
@@ -98,9 +106,10 @@ OpenRouter app attribution. In an existing REPL session, run:
 /model openrouter openrouter/auto
 ```
 
-`pip install -e .` registers the `forgeflow` command (via the `[project.scripts]` entry
+`pip install -e .` registers the `cosnex` command (via the `[project.scripts]` entry
 point in `pyproject.toml`) on your PATH for as long as the environment it was installed into is
-active. The older `ai-orchestrator` executable remains available as a compatibility alias.
+active. The older `forgeflow` and `ai-orchestrator` executables remain available
+as compatibility aliases.
 
 ### Installing from a zip
 
@@ -108,14 +117,14 @@ To set this up on another machine (or share it) without cloning the repo, zip th
 parts and hand that off instead:
 
 ```bash
-zip -r forgeflow.zip ai_orchestrator pyproject.toml README.md .env.example scripts \
+zip -r cosnex.zip ai_orchestrator pyproject.toml README.md .env.example scripts \
   -x "*/__pycache__/*" "*.pyc"
 ```
 
 Then, wherever you want to use it:
 
 ```bash
-unzip forgeflow.zip -d forgeflow && cd forgeflow
+unzip cosnex.zip -d cosnex && cd cosnex
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 cp .env.example .env   # fill in your provider keys
@@ -135,8 +144,8 @@ does *not* need to live inside the project it's working on.
 ~/projects/todo/                # your actual project — orchestrator is never copied in here
   frontend/
   backend/
-  .venv/                        # any venv with ForgeFlow installed (todo's own or shared)
-  .env                          # ForgeFlow provider keys and model lists go here
+  .venv/                        # any venv with Cosnex installed (todo's own or shared)
+  .env                          # Cosnex provider keys and model lists go here
   .orchestrator/                # created automatically: knowledge graph + chat history
 ```
 
@@ -146,16 +155,16 @@ Steps:
 pip install -e ~/tools/ai_orchestrator          # once, into whichever venv you'll activate below
 cp ~/tools/ai_orchestrator/.env.example ~/projects/todo/.env   # then fill in your keys
 cd ~/projects/todo
-forgeflow chat
+cosnex chat
 ```
 
 Notes:
-- ForgeFlow reads `.env` and writes `.orchestrator/` in whatever directory you launch
-  `forgeflow chat` from — that's why `.env` belongs at the root of `todo/`, not inside
+- Cosnex reads `.env` and writes `.orchestrator/` in whatever directory you launch
+  `cosnex chat` from — that's why `.env` belongs at the root of `todo/`, not inside
   `ai_orchestrator/`.
 - Don't pass `--project-dir` for an existing repo like this — that flag is for the separate
   `init`/`plan`/`run` scaffolding pipeline and points the agent at `<project-dir>/workspace/`
-  instead of the directory itself. Running `forgeflow chat` with no flags from inside
+  instead of the directory itself. Running `cosnex chat` with no flags from inside
   `todo/` operates on `todo/` directly (though in that mode the knowledge graph and chat
   history are rebuilt each session rather than cached to disk).
 
@@ -175,7 +184,7 @@ at the right files instead of exploring an unfamiliar codebase blind — see
 - **Manual rebuild from the CLI, without opening chat** — refresh the graph for a scaffolded
   project as part of `plan`:
   ```bash
-  forgeflow plan ./my-app
+  cosnex plan ./my-app
   ```
 - **Let the agent trigger it mid-conversation** — the agent has a `build_knowledge_graph` tool
   it can call itself (e.g. after you tell it you added a bunch of new files), and `kg_stats` /
@@ -187,7 +196,7 @@ it, and — per [Using it in an existing project](#using-it-in-an-existing-proje
 points the agent at `<project-dir>/workspace/`, not the directory itself, so it's not a drop-in
 flag for an arbitrary existing repo laid out like `frontend/`/`backend/`. Two ways to get a
 persisted graph for a project like that today:
-- Run plain `forgeflow chat` from the project root and use `/kg rebuild` for a fresh index
+- Run plain `cosnex chat` from the project root and use `/kg rebuild` for a fresh index
   within that session — it stays fast for the rest of the session, but isn't cached to disk, so
   the next session rebuilds it again from scratch.
 - Or lay the project out to match the scaffolding convention (actual code under a `workspace/`
@@ -196,11 +205,11 @@ persisted graph for a project like that today:
 ## Commands
 
 ```bash
-forgeflow chat                          # interactive chat with the coding agent
-forgeflow init ./my-app --name my-app    # scaffold a new orchestration project
-forgeflow plan ./my-app                  # generate stage task packets + refresh the KG
-forgeflow run ./my-app --execute          # run the multi-stage build pipeline
-forgeflow context show ./my-app          # inspect shared project context
+cosnex chat                          # interactive chat with the coding agent
+cosnex init ./my-app --name my-app    # scaffold a new orchestration project
+cosnex plan ./my-app                  # generate stage task packets + refresh the KG
+cosnex run ./my-app --execute          # run the multi-stage build pipeline
+cosnex context show ./my-app          # inspect shared project context
 ```
 
 ## Inside the chat REPL

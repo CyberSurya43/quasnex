@@ -18,7 +18,7 @@ from .ui import APP_NAME, TAGLINE
 def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        prog="forgeflow",
+        prog="cosnex",
         description=f"{APP_NAME} — {TAGLINE} A LangGraph-powered coding agent.",
         formatter_class=RichHelpFormatter,
     )

@@ -4,20 +4,31 @@ from pathlib import Path
 import tomllib
 import unittest
 
-from ai_orchestrator.cli.ui import APP_NAME, TAGLINE
+from ai_orchestrator.cli.ui import APP_NAME, BRAND_ICON, TAGLINE, brand_lockup, metadata_chip
 
 
-class ForgeFlowBrandingTests(unittest.TestCase):
+class CosnexBrandingTests(unittest.TestCase):
     def test_public_brand_name(self) -> None:
-        self.assertEqual(APP_NAME, "ForgeFlow")
+        self.assertEqual(APP_NAME, "Cosnex")
+        self.assertEqual(BRAND_ICON, "◉─✦─◉")
+        self.assertIn("cosmos", TAGLINE.lower())
+        self.assertIn("nexus", TAGLINE.lower())
         self.assertTrue(TAGLINE)
+        self.assertIn("COSNEX", brand_lockup().plain)
+
+    def test_metadata_chip_contains_label_and_value(self) -> None:
+        chip = metadata_chip("model", "openrouter/auto")
+
+        self.assertIn("MODEL", chip.plain)
+        self.assertIn("openrouter/auto", chip.plain)
 
     def test_primary_and_compatibility_commands_are_registered(self) -> None:
         project_root = Path(__file__).resolve().parents[2]
         config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
         scripts = config["project"]["scripts"]
 
-        self.assertEqual(config["project"]["name"], "forgeflow")
+        self.assertEqual(config["project"]["name"], "cosnex")
+        self.assertEqual(scripts["cosnex"], "ai_orchestrator.cli:main")
         self.assertEqual(scripts["forgeflow"], "ai_orchestrator.cli:main")
         self.assertEqual(scripts["ai-orchestrator"], "ai_orchestrator.cli:main")
 

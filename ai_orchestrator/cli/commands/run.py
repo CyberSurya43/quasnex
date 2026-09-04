@@ -23,28 +23,30 @@ def handle_run(args) -> None:
     results = orchestrator.run(args.stage, args.execute)
 
     table = Table(
-        title="Pipeline results",
-        title_style="forge.brand",
-        box=box.ROUNDED,
-        border_style="bright_cyan",
-        header_style="bold bright_magenta",
+        title="PIPELINE RESULTS",
+        title_style="cosnex.brand",
+        box=box.SIMPLE_HEAVY,
+        border_style="cosnex.border",
+        header_style="cosnex.muted",
+        row_styles=("", "#cbd5e1"),
+        pad_edge=False,
     )
-    table.add_column("Mode", style="forge.muted")
+    table.add_column("Mode", style="cosnex.muted")
     table.add_column("Stage", style="bold")
     table.add_column("Agent")
     table.add_column("Model", overflow="fold")
     table.add_column("Status", justify="center")
-    table.add_column("Task file", style="forge.path", overflow="fold")
+    table.add_column("Task file", style="cosnex.path", overflow="fold")
     for result in results:
         mode = "executed" if result["executed"] else "dry-run"
         model = result.get("model_used") or "n/a"
         status = (
-            "[forge.success]✓ passed[/forge.success]"
+            "[cosnex.success]✓ passed[/cosnex.success]"
             if result.get("success")
             else (
-                "[forge.warning]○ pending[/forge.warning]"
+                "[cosnex.warning]● pending[/cosnex.warning]"
                 if not result["executed"]
-                else "[forge.error]✗ failed[/forge.error]"
+                else "[cosnex.error]✗ failed[/cosnex.error]"
             )
         )
         table.add_row(

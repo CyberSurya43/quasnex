@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "forgeflow"
+name = "cosnex"
 version = "0.2.0"
-description = "ForgeFlow: a LangGraph-powered CLI coding agent for planning, building, testing, and shipping apps."
+description = "Cosnex: a LangGraph-powered CLI coding agent for planning, building, testing, and shipping apps."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -24,8 +24,9 @@ dependencies = [
 dev = ["pytest"]
 
 [project.scripts]
-forgeflow = "ai_orchestrator.cli:main"
+cosnex = "ai_orchestrator.cli:main"
 # Backward-compatible executable name for existing installations and scripts.
+forgeflow = "ai_orchestrator.cli:main"
 ai-orchestrator = "ai_orchestrator.cli:main"
 
 [tool.setuptools.packages.find]
