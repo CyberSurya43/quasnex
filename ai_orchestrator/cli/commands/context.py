@@ -23,14 +23,14 @@ def handle_context(args) -> None:
         for pair in args.pairs:
             if "=" not in pair:
                 console.print(
-                    f"[cosnex.warning]Skipped malformed pair[/cosnex.warning] "
-                    f"[cosnex.muted](expected KEY=VALUE): {escape(pair)!r}[/cosnex.muted]"
+                    f"[quasnex.warning]Skipped malformed pair[/quasnex.warning] "
+                    f"[quasnex.muted](expected KEY=VALUE): {escape(pair)!r}[/quasnex.muted]"
                 )
                 continue
             key, _, value = pair.partition("=")
             ctx_store.set_user_preference(project_dir, key.strip(), value.strip())
             console.print(
-                f"[cosnex.success]✓ Preference saved[/cosnex.success]  "
+                f"[quasnex.success]✓ Preference saved[/quasnex.success]  "
                 f"[bold]{escape(key.strip())}[/bold] = {escape(value.strip())}"
             )
 
@@ -38,12 +38,12 @@ def handle_context(args) -> None:
         data = ctx_store.load(project_dir)
         table = Table(
             box=box.MINIMAL,
-            border_style="cosnex.border",
+            border_style="quasnex.border",
             show_header=False,
             pad_edge=False,
         )
-        table.add_column("Project", style="cosnex.muted")
-        table.add_column(style="cosnex.path")
+        table.add_column("Project", style="quasnex.muted")
+        table.add_column(style="quasnex.path")
         table.add_row("Context store", str(project_dir / ".orchestrator" / "context.json"))
         console.print(table)
         console.print(Syntax(json.dumps(data, indent=2), "json", theme="monokai", word_wrap=True))

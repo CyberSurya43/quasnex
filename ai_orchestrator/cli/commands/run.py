@@ -24,29 +24,29 @@ def handle_run(args) -> None:
 
     table = Table(
         title="PIPELINE RESULTS",
-        title_style="cosnex.brand",
+        title_style="quasnex.brand",
         box=box.SIMPLE_HEAVY,
-        border_style="cosnex.border",
-        header_style="cosnex.muted",
+        border_style="quasnex.border",
+        header_style="quasnex.muted",
         row_styles=("", "#cbd5e1"),
         pad_edge=False,
     )
-    table.add_column("Mode", style="cosnex.muted")
+    table.add_column("Mode", style="quasnex.muted")
     table.add_column("Stage", style="bold")
     table.add_column("Agent")
     table.add_column("Model", overflow="fold")
     table.add_column("Status", justify="center")
-    table.add_column("Task file", style="cosnex.path", overflow="fold")
+    table.add_column("Task file", style="quasnex.path", overflow="fold")
     for result in results:
         mode = "executed" if result["executed"] else "dry-run"
         model = result.get("model_used") or "n/a"
         status = (
-            "[cosnex.success]✓ passed[/cosnex.success]"
+            "[quasnex.success]✓ passed[/quasnex.success]"
             if result.get("success")
             else (
-                "[cosnex.warning]● pending[/cosnex.warning]"
+                "[quasnex.warning]● pending[/quasnex.warning]"
                 if not result["executed"]
-                else "[cosnex.error]✗ failed[/cosnex.error]"
+                else "[quasnex.error]✗ failed[/quasnex.error]"
             )
         )
         table.add_row(

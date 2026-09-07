@@ -21,12 +21,15 @@ from ai_orchestrator.agent_tools.confirm import set_os_permission_sink
 from ai_orchestrator.core import CodingAgent, HardStopError, MIN_RECURSION_LIMIT
 from ai_orchestrator.llm import ModelRegistry, UnknownModelError, UnknownProviderError
 from ai_orchestrator.skills import list_skills, load_skill
+from ai_orchestrator.integrations import IntegrationError
+from ai_orchestrator.agent_tools import mcp_tools
 from ai_orchestrator.cli.ui import (
     APP_NAME,
     TAGLINE,
     brand_lockup,
     console,
-    cosnex_indexing_animation,
+    quasnex_indexing_animation,
+    quasnex_activity,
     metadata_chip,
 )
 
@@ -41,11 +44,7 @@ _active_status = None
 @contextmanager
 def _thinking_status():
     global _active_status
-    status = console.status(
-        "[cosnex.subtle]Thinking[/cosnex.subtle]",
-        spinner="dots",
-        spinner_style="cosnex.violet",
-    )
+    status = quasnex_activity("Thinking · working on your request")
     status.start()
     _active_status = status
     try:
@@ -98,14 +97,16 @@ _HELP_COMMANDS = (
     ("Models", "/model <provider> [model]", "Switch directly"),
     ("Workspace", "/kg [rebuild]", "Inspect or rebuild the knowledge graph"),
     ("Workspace", "/tools", "List agent tools"),
-    ("Workspace", "/skills", "List available workflows"),
+    ("Workspace", "/skills", "List built-in and external skills"),
+    ("Workspace", "/mcp [tools <server>]", "List MCP servers or discover server tools"),
+    ("Workflows", "/skill <name> <task>", "Use an external or built-in skill"),
     ("Workflows", "/plan <task>", "Analyze, implement, and verify"),
     ("Workflows", "/build <task>", "Build with the coding workflow"),
     ("Workflows", "/debug <task>", "Investigate and fix a bug"),
     ("Workflows", "/test [task]", "Run or write tests"),
     ("Workflows", "/deploy [task]", "Prepare a deployment"),
     ("Session", "/clear", "Start a fresh conversation"),
-    ("Session", "/exit", "Close Cosnex"),
+    ("Session", "/exit", "Close Quasnex"),
 )
 
 
@@ -154,12 +155,12 @@ class ChatSession:
     def run(self) -> None:
         planner = self.registry.planner_model()
 
-        with cosnex_indexing_animation():
+        with quasnex_indexing_animation():
             graph = kg.build_or_update(self.workspace_root, self.kg_store_dir)
 
         console.print()
-        console.print(Rule(brand_lockup(), style="cosnex.border", align="left"))
-        console.print(Text(f"  {TAGLINE}", style="cosnex.subtle"))
+        console.print(Rule(brand_lockup(), style="quasnex.border", align="left"))
+        console.print(Text(f"  {TAGLINE}", style="quasnex.subtle"))
         console.print()
         index_summary = (
             f"{len(graph['files'])} files · {len(graph['edges'])} edges"
@@ -173,24 +174,24 @@ class ChatSession:
         )
         console.print(chips)
         console.print(Text.assemble(
-            ("  workspace  ", "cosnex.muted"),
-            (str(self.workspace_root), "cosnex.path"),
+            ("  workspace  ", "quasnex.muted"),
+            (str(self.workspace_root), "quasnex.path"),
         ))
         console.print(
             Text.assemble(
-                ("  quick actions  ", "cosnex.muted"),
-                ("/help", "cosnex.accent"),
+                ("  quick actions  ", "quasnex.muted"),
+                ("/help", "quasnex.accent"),
                 ("   ", ""),
-                ("/model", "cosnex.violet"),
+                ("/model", "quasnex.violet"),
                 ("   ", ""),
-                ("/exit", "cosnex.subtle"),
+                ("/exit", "quasnex.subtle"),
             )
         )
 
         while True:
             try:
                 user_input = console.input(
-                    "\n[cosnex.muted]you[/cosnex.muted] [cosnex.accent]❯[/cosnex.accent] "
+                    "\n[quasnex.muted]you[/quasnex.muted] [quasnex.accent]❯[/quasnex.accent] "
                 ).strip()
             except (KeyboardInterrupt, EOFError):
                 console.print("\n[dim]Goodbye![/dim]")
@@ -228,8 +229,8 @@ class ChatSession:
             console.print(
                 Text.assemble(
                     (" TOOL ", "bold #0b1120 on #a78bfa"),
-                    (f" {name} ", "cosnex.violet"),
-                    (preview, "cosnex.muted"),
+                    (f" {name} ", "quasnex.violet"),
+                    (preview, "quasnex.muted"),
                 )
             )
 
@@ -261,9 +262,9 @@ class ChatSession:
         console.print(
             Panel(
                 Markdown(response),
-                title=f"[cosnex.accent]✦[/cosnex.accent] [cosnex.brand]{APP_NAME}[/cosnex.brand]",
+                title=f"[quasnex.accent]✦[/quasnex.accent] [quasnex.brand]{APP_NAME}[/quasnex.brand]",
                 title_align="left",
-                border_style="cosnex.border",
+                border_style="quasnex.border",
                 box=box.MINIMAL,
                 padding=(0, 2),
             )
@@ -276,22 +277,22 @@ class ChatSession:
             return
         if not verification.attempted:
             console.print(
-                "[cosnex.muted]○  No test command detected; changes were not auto-verified.[/cosnex.muted]"
+                "[quasnex.muted]○  No test command detected; changes were not auto-verified.[/quasnex.muted]"
             )
         elif not verification.ran:
             console.print(
-                f"[cosnex.warning]○  Verification skipped[/cosnex.warning]  "
-                f"[cosnex.muted]{verification.command}[/cosnex.muted]"
+                f"[quasnex.warning]○  Verification skipped[/quasnex.warning]  "
+                f"[quasnex.muted]{verification.command}[/quasnex.muted]"
             )
         elif verification.passed:
             console.print(
-                f"[cosnex.success]●  Verified[/cosnex.success]  "
-                f"[cosnex.subtle]{verification.command}[/cosnex.subtle]"
+                f"[quasnex.success]●  Verified[/quasnex.success]  "
+                f"[quasnex.subtle]{verification.command}[/quasnex.subtle]"
             )
         else:
             console.print(
-                f"[cosnex.error]●  Verification failed[/cosnex.error]  "
-                f"[cosnex.subtle]{verification.command} is still failing after auto-fix attempts.[/cosnex.subtle]"
+                f"[quasnex.error]●  Verification failed[/quasnex.error]  "
+                f"[quasnex.subtle]{verification.command} is still failing after auto-fix attempts.[/quasnex.subtle]"
             )
 
     def _retry_with_fallback(
@@ -344,10 +345,10 @@ class ChatSession:
         for index, (label, role, instruction) in enumerate(_PLAN_WORKFLOW, start=1):
             console.print(
                 Rule(
-                    f"[cosnex.accent]0{index}[/cosnex.accent]  "
-                    f"[cosnex.brand]{label}[/cosnex.brand]  "
-                    f"[cosnex.muted]{role}[/cosnex.muted]",
-                    style="cosnex.border",
+                    f"[quasnex.accent]0{index}[/quasnex.accent]  "
+                    f"[quasnex.brand]{label}[/quasnex.brand]  "
+                    f"[quasnex.muted]{role}[/quasnex.muted]",
+                    style="quasnex.border",
                     align="left",
                 )
             )
@@ -389,7 +390,7 @@ class ChatSession:
 
         if cmd == "/clear":
             self.agent.clear_history()
-            console.print("[cosnex.success]●[/cosnex.success]  Fresh conversation started")
+            console.print("[quasnex.success]●[/quasnex.success]  Fresh conversation started")
             return False
 
         if cmd == "/tools":
@@ -401,12 +402,39 @@ class ChatSession:
             return False
 
         if cmd == "/skills":
-            self._print_collection("WORKFLOWS", list_skills())
+            try:
+                self._print_collection("SKILLS", list_skills(self.project_dir or self.workspace_root))
+            except IntegrationError as exc:
+                console.print(f"Error: {exc}", markup=False)
+            return False
+
+        if cmd == "/mcp":
+            tools = {tool.name: tool for tool in mcp_tools.build_tools(self.project_dir or self.workspace_root)}
+            if len(parts) == 1:
+                result = tools["list_mcp_servers"].invoke({})
+            elif len(parts) == 3 and parts[1] == "tools":
+                result = tools["list_mcp_tools"].invoke({"server": parts[2]})
+            else:
+                result = "Usage: /mcp or /mcp tools <server>"
+            console.print(result, markup=False)
+            return False
+
+        if cmd == "/skill":
+            if len(parts) < 2:
+                console.print("Usage: /skill <name> <task>")
+                return False
+            skill_text = load_skill(parts[1], self.project_dir or self.workspace_root)
+            if skill_text.startswith("Error"):
+                console.print(skill_text, markup=False)
+                return False
+            task = raw.split(maxsplit=2)[2] if len(parts) > 2 else "Continue the current work"
+            self._send(f"Follow these instructions:\n\n{skill_text}\n\n---\nTask: {task}",
+                       _SKILL_MODEL_ROLES.get(parts[1], "coding"))
             return False
 
         if cmd == "/kg":
             if len(parts) > 1 and parts[1] == "rebuild":
-                with cosnex_indexing_animation():
+                with quasnex_indexing_animation():
                     graph = kg.build_or_update(self.workspace_root, None)  # bypass cache
                     kg.save_graph(self.kg_store_dir, graph)
             else:
@@ -420,7 +448,7 @@ class ChatSession:
                     "  ",
                     metadata_chip("edges", str(len(graph["edges"])), accent="#a78bfa"),
                     "  ",
-                    (str(graph["root"]), "cosnex.path"),
+                    (str(graph["root"]), "quasnex.path"),
                 )
             )
             return False
@@ -431,7 +459,7 @@ class ChatSession:
             if skill_name == "plan":
                 self._run_plan_workflow(task)
                 return False
-            skill_text = load_skill(skill_name)
+            skill_text = load_skill(skill_name, self.project_dir or self.workspace_root)
             message = f"Follow these instructions:\n\n{skill_text}\n\n---\nTask: {task or '(continue the current work)'}"
             self._send(message, _SKILL_MODEL_ROLES.get(skill_name, "planner"))
             return False
@@ -462,15 +490,15 @@ class ChatSession:
         route = self.registry.planner_model()
         table = Table(
             title="MODEL REGISTRY",
-            title_style="cosnex.brand",
+            title_style="quasnex.brand",
             box=box.SIMPLE_HEAVY,
-            border_style="cosnex.border",
-            header_style="cosnex.muted",
+            border_style="quasnex.border",
+            header_style="quasnex.muted",
             show_lines=False,
             row_styles=("", "#cbd5e1"),
             pad_edge=False,
         )
-        table.add_column("#", justify="right", style="cosnex.accent", width=3)
+        table.add_column("#", justify="right", style="quasnex.accent", width=3)
         table.add_column("Provider", style="bold")
         table.add_column("Model", overflow="fold")
         table.add_column("Status", justify="center")
@@ -478,29 +506,29 @@ class ChatSession:
         for provider_name, models in self.registry.list_available().items():
             for model_name in models:
                 status = (
-                    "[cosnex.success]● active[/cosnex.success]"
+                    "[quasnex.success]● active[/quasnex.success]"
                     if (provider_name, model_name) == current
-                    else "[cosnex.muted]available[/cosnex.muted]"
+                    else "[quasnex.muted]available[/quasnex.muted]"
                 )
                 table.add_row(str(index), Text(provider_name), Text(model_name), status)
                 index += 1
         console.print(table)
         console.print(
-            f"[cosnex.muted]Planner route:[/cosnex.muted] {route.provider} / {route.model}  "
-            "[cosnex.muted]•[/cosnex.muted]  Choose with [bold]/model[/bold]"
+            f"[quasnex.muted]Planner route:[/quasnex.muted] {route.provider} / {route.model}  "
+            "[quasnex.muted]•[/quasnex.muted]  Choose with [bold]/model[/bold]"
         )
 
     def _print_help(self) -> None:
         table = Table(
             title="COMMAND PALETTE",
-            title_style="cosnex.brand",
+            title_style="quasnex.brand",
             box=box.SIMPLE_HEAVY,
-            border_style="cosnex.border",
-            header_style="cosnex.muted",
+            border_style="quasnex.border",
+            header_style="quasnex.muted",
             expand=False,
             pad_edge=False,
         )
-        table.add_column("Group", style="cosnex.muted", no_wrap=True)
+        table.add_column("Group", style="quasnex.muted", no_wrap=True)
         table.add_column("Command", style="bold cyan", no_wrap=True)
         table.add_column("What it does")
         previous_group = None
@@ -510,7 +538,7 @@ class ChatSession:
         console.print(table)
 
     def _print_collection(self, title: str, items) -> None:
-        console.print(Rule(f"[cosnex.brand]{title}[/cosnex.brand]", style="cosnex.border"))
+        console.print(Rule(f"[quasnex.brand]{title}[/quasnex.brand]", style="quasnex.border"))
         cards = [Text(f" {name} ", style="#cbd5e1 on #1e293b") for name in items]
         console.print(Columns(cards, padding=(0, 1), equal=False, expand=False))
 

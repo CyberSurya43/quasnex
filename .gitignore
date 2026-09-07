@@ -8,6 +8,18 @@ venv/
 dist/
 build/
 .env
+.quasnex.json
+
+# Generated release archives
+/cosnex*.zip
+/quasnex*.zip
+
+# Local tooling and OS artifacts
+.ruff_cache/
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db
 
 # Generated per-project orchestrator state (not the templates that ship it)
 .orchestrator/runs/

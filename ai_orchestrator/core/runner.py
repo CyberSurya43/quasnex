@@ -107,7 +107,7 @@ class Orchestrator:
         content += "\n" + self._add_professional_guidelines(stage)
         skill_name = _matching_skill(stage.name)
         if skill_name:
-            content += f"\n---\n## Skill: {skill_name}\n\n{load_skill(skill_name)}\n"
+            content += f"\n---\n## Skill: {skill_name}\n\n{load_skill(skill_name, self.project_dir)}\n"
         content += ctx_store.inject_context_block(self.project_dir)
 
         task_file.write_text(content, encoding="utf-8")

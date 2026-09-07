@@ -12,14 +12,15 @@ from .commands.chat import handle_chat
 from .commands.context import handle_context
 from .commands.plan import handle_plan
 from .commands.run import handle_run
+from .commands.integrations import handle_integrations
 from .ui import APP_NAME, TAGLINE
 
 
 def main() -> None:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
-        prog="cosnex",
-        description=f"{APP_NAME} — {TAGLINE} A LangGraph-powered coding agent.",
+        prog="quasnex",
+        description=f"{APP_NAME} — {TAGLINE}",
         formatter_class=RichHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -66,6 +67,12 @@ def main() -> None:
     )
     chat_parser.add_argument("--project-dir", type=Path, help="Project directory for context")
 
+    integrations_parser = subparsers.add_parser(
+        "integrations", help="Configure external MCP servers and skills", **sub_kwargs
+    )
+    integrations_parser.add_argument("action", choices=("init", "list"))
+    integrations_parser.add_argument("--project-dir", type=Path, help="Project root containing .quasnex.json")
+
     args = parser.parse_args()
 
     # Dispatch to command handlers
@@ -79,6 +86,8 @@ def main() -> None:
         handle_plan(args.project_dir)
     elif args.command == "run":
         handle_run(args)
+    elif args.command == "integrations":
+        handle_integrations(args.action, args.project_dir)
 
 
 if __name__ == "__main__":

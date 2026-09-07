@@ -6,7 +6,7 @@ from pathlib import Path
 
 from langchain_core.tools import BaseTool
 
-from . import fs_tools, kg_tools, memory_tools, scaffold_tools, shell_tools, skill_tools, web_tools
+from . import fs_tools, kg_tools, memory_tools, mcp_tools, scaffold_tools, shell_tools, skill_tools, web_tools
 from .confirm import confirm, set_confirmation_sink, set_os_permission_sink
 from .tool_context import ToolContext
 
@@ -41,5 +41,6 @@ def build_all_tools(
     tools.extend(web_tools.build_tools())
     tools.extend(scaffold_tools.build_tools(project_dir or workspace_root))
     tools.extend(memory_tools.build_tools(project_dir))
-    tools.extend(skill_tools.build_tools())
+    tools.extend(skill_tools.build_tools(project_dir or workspace_root))
+    tools.extend(mcp_tools.build_tools(project_dir or workspace_root))
     return tools

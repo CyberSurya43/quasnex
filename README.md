@@ -1,11 +1,22 @@
-# Cosnex
+# Quasnex — Multi-Model AI Coding Orchestrator
 
-A rich CLI coding agent for planning, building, testing, and shipping apps —
-powered by your own hosted models instead of third-party CLI tools.
+Quasnex is a multi-model AI coding orchestrator that helps you plan, build,
+test, and ship applications from your terminal. Connect self-hosted or hosted
+models through OpenAI-compatible endpoints, then route coding tasks to the
+models configured for each role.
 
-`Cosnex` combines **Cosmos** and **Nexus**. Its terminal mark, `◉─✦─◉`, pairs a
-star with connected nodes; the animated version maps your repository cosmos
-into a navigable code nexus whenever chat indexing starts.
+The core workflow is **analyze → implement → verify**: understand the task and
+repository, make changes, and check the result.
+
+The CLI uses a compact `[Q]` mark and a pulse moving between three connected
+nodes, representing that workflow. The animation runs while Quasnex indexes
+your repository or works on a chat request, with text describing the current
+activity. It indicates activity, not a completion percentage or active model count.
+
+```text
+[Q] Quasnex — Multi-Model AI Coding Orchestrator
+[Q] ●──○──○ Quasnex  Indexing repository · building code context
+```
 
 The terminal UI uses a compact developer-tool layout with cyan/violet status
 chips, lightweight separators, a command palette, model registry, animated
@@ -62,7 +73,8 @@ progress states, and Markdown response cards that adapt to the terminal width.
 | Knowledge gateway | `web_search`, `fetch_url` — so a small/open-weight model can pull current docs instead of relying on stale training data |
 | Knowledge graph | `build_knowledge_graph`, `resolve_issue`, `kg_stats` |
 | Memory | `remember`, `recall` |
-| Skills | `load_skill_instructions` |
+| Skills | `list_available_skills`, `load_skill_instructions`, `load_skill_resource` |
+| MCP | `list_mcp_servers`, `list_mcp_tools`, `call_mcp_tool` |
 | Scaffolding | `scaffold_project` |
 
 ## Quick Start
@@ -74,7 +86,7 @@ pip install -e .
 # Copy your .env with LIGHTNING_*/NVIDIA_*/OPENROUTER_* credentials into the project root
 cp .env.example .env  # then fill in your keys
 
-cosnex chat
+quasnex chat
 ```
 
 ### OpenRouter setup
@@ -106,9 +118,9 @@ OpenRouter app attribution. In an existing REPL session, run:
 /model openrouter openrouter/auto
 ```
 
-`pip install -e .` registers the `cosnex` command (via the `[project.scripts]` entry
+`pip install -e .` registers the `quasnex` command (via the `[project.scripts]` entry
 point in `pyproject.toml`) on your PATH for as long as the environment it was installed into is
-active. The older `forgeflow` and `ai-orchestrator` executables remain available
+active. The older `cosnex`, `forgeflow`, and `ai-orchestrator` executables remain available
 as compatibility aliases.
 
 ### Installing from a zip
@@ -117,14 +129,14 @@ To set this up on another machine (or share it) without cloning the repo, zip th
 parts and hand that off instead:
 
 ```bash
-zip -r cosnex.zip ai_orchestrator pyproject.toml README.md .env.example scripts \
+zip -r quasnex.zip ai_orchestrator pyproject.toml README.md .env.example scripts \
   -x "*/__pycache__/*" "*.pyc"
 ```
 
 Then, wherever you want to use it:
 
 ```bash
-unzip cosnex.zip -d cosnex && cd cosnex
+unzip quasnex.zip -d quasnex && cd quasnex
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 cp .env.example .env   # fill in your provider keys
@@ -144,8 +156,8 @@ does *not* need to live inside the project it's working on.
 ~/projects/todo/                # your actual project — orchestrator is never copied in here
   frontend/
   backend/
-  .venv/                        # any venv with Cosnex installed (todo's own or shared)
-  .env                          # Cosnex provider keys and model lists go here
+  .venv/                        # any venv with Quasnex installed (todo's own or shared)
+  .env                          # Quasnex provider keys and model lists go here
   .orchestrator/                # created automatically: knowledge graph + chat history
 ```
 
@@ -155,18 +167,144 @@ Steps:
 pip install -e ~/tools/ai_orchestrator          # once, into whichever venv you'll activate below
 cp ~/tools/ai_orchestrator/.env.example ~/projects/todo/.env   # then fill in your keys
 cd ~/projects/todo
-cosnex chat
+quasnex chat
 ```
 
 Notes:
-- Cosnex reads `.env` and writes `.orchestrator/` in whatever directory you launch
-  `cosnex chat` from — that's why `.env` belongs at the root of `todo/`, not inside
+- Quasnex reads `.env` and writes `.orchestrator/` in whatever directory you launch
+  `quasnex chat` from — that's why `.env` belongs at the root of `todo/`, not inside
   `ai_orchestrator/`.
 - Don't pass `--project-dir` for an existing repo like this — that flag is for the separate
   `init`/`plan`/`run` scaffolding pipeline and points the agent at `<project-dir>/workspace/`
-  instead of the directory itself. Running `cosnex chat` with no flags from inside
+  instead of the directory itself. Running `quasnex chat` with no flags from inside
   `todo/` operates on `todo/` directly (though in that mode the knowledge graph and chat
   history are rebuilt each session rather than cached to disk).
+
+## External MCP servers and skills
+
+Quasnex can use tools from external MCP servers and instructions from external
+skill folders during `/build`, `/debug`, `/plan`, and ordinary chat tasks.
+These integrations are also available to the agent used by the stage pipeline.
+
+### Set up integrations
+
+From the Quasnex source checkout, install the optional MCP dependency into your
+active Python environment:
+
+```bash
+python -m pip install -e ".[mcp]"
+```
+
+Then, from the application you want to build or debug:
+
+```bash
+quasnex integrations init
+quasnex integrations list
+```
+
+`init` creates `.quasnex.json` with disabled sample servers. Edit it to point at
+your servers, then enable the ones you want. Existing configuration is preserved.
+For a scaffolded project, keep this file beside `orchestrator.toml`, and use
+`quasnex integrations init --project-dir ./my-app`.
+
+### Connect MCP servers
+
+Example `.quasnex.json`:
+
+```json
+{
+  "mcpServers": {
+    "local-tools": {
+      "transport": "stdio",
+      "command": "/absolute/path/to/python",
+      "args": ["/absolute/path/to/mcp_server.py"],
+      "env": {"SERVICE_TOKEN": "${SERVICE_TOKEN}"},
+      "timeout": 30
+    },
+    "remote-tools": {
+      "transport": "streamable-http",
+      "url": "https://your-server.example/mcp",
+      "headers": {"Authorization": "Bearer ${MCP_API_TOKEN}"},
+      "timeout": 60
+    }
+  },
+  "skills": ["/absolute/path/to/my-skills"]
+}
+```
+
+Replace the example paths and URL, and remove any entries you don't use. A stdio
+server can use any executable, including `node`, `npx`, or `uvx`; `args` are passed
+directly without a shell. Its working directory defaults to your project root;
+set `cwd` to change it. Legacy SSE servers use `"transport": "sse"`.
+
+`${VARIABLE}` values are resolved from the project's `.env`, falling back to the
+process environment. Only explicitly configured `env` values and the MCP SDK's
+basic process environment are passed to local servers. Missing variables report
+an error. Set `"enabled": false` to disable an entry. Configuration changes are
+read on the next integration operation; no chat restart is needed.
+
+Inside chat:
+
+```text
+/mcp
+/mcp tools local-tools
+/build Add the dashboard using the relevant tools from local-tools
+/debug Use remote-tools to investigate the failing API request
+```
+
+The agent discovers each server's tool names and input schemas before calling
+them. Quasnex asks for confirmation before connecting or invoking an MCP tool,
+using the same confirmation UI as filesystem and shell actions. Each operation
+opens and closes its own session, so server session state is not retained between
+calls. This integration supports MCP **tools**; MCP resources, prompts, and OAuth
+login flows are not exposed yet. Use configured authentication headers where needed.
+The client uses the [official MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk/tree/v1.x).
+
+### Add external skills
+
+For a project-specific skill, create this structure:
+
+```text
+my-app/
+  .quasnex/
+    skills/
+      api-debug/
+        SKILL.md
+        references.md
+```
+
+Example `SKILL.md`:
+
+```markdown
+# API debugging
+
+1. Reproduce the failing request and inspect the relevant code.
+2. Discover configured MCP tools that can inspect API logs or documentation.
+3. Read references.md for project-specific debugging steps.
+4. Fix the cause, run focused tests, and report the result.
+```
+
+For skills stored elsewhere, add paths to the `skills` array in `.quasnex.json`.
+Each path can be a `SKILL.md` file, a folder containing one, or a collection of
+skill folders. Flat `.md` instruction files are also supported. Relative paths
+are resolved against the project root; `~` paths are supported.
+
+Skill names come from the containing folder for `SKILL.md`, or the filename for
+other Markdown files. Names must use letters, numbers, hyphens, or underscores.
+Duplicate names, including names of built-in skills, report a configuration error.
+Quasnex reads instructions and companion text files; it does not automatically
+install dependencies or execute scripts bundled with a skill.
+
+```text
+/skills
+/skill api-debug Fix the login endpoint returning 500
+/build Build a settings page using my frontend skill
+/debug Use api-debug to investigate the login failure
+```
+
+The agent can discover skills with `list_available_skills`, load their instructions
+with `load_skill_instructions`, and read companion files with `load_skill_resource`.
+The built-in `plan`, `build`, `test`, `deploy`, and `debug` skills remain available.
 
 ## Building / rebuilding the knowledge graph
 
@@ -184,7 +322,7 @@ at the right files instead of exploring an unfamiliar codebase blind — see
 - **Manual rebuild from the CLI, without opening chat** — refresh the graph for a scaffolded
   project as part of `plan`:
   ```bash
-  cosnex plan ./my-app
+  quasnex plan ./my-app
   ```
 - **Let the agent trigger it mid-conversation** — the agent has a `build_knowledge_graph` tool
   it can call itself (e.g. after you tell it you added a bunch of new files), and `kg_stats` /
@@ -196,7 +334,7 @@ it, and — per [Using it in an existing project](#using-it-in-an-existing-proje
 points the agent at `<project-dir>/workspace/`, not the directory itself, so it's not a drop-in
 flag for an arbitrary existing repo laid out like `frontend/`/`backend/`. Two ways to get a
 persisted graph for a project like that today:
-- Run plain `cosnex chat` from the project root and use `/kg rebuild` for a fresh index
+- Run plain `quasnex chat` from the project root and use `/kg rebuild` for a fresh index
   within that session — it stays fast for the rest of the session, but isn't cached to disk, so
   the next session rebuilds it again from scratch.
 - Or lay the project out to match the scaffolding convention (actual code under a `workspace/`
@@ -205,11 +343,11 @@ persisted graph for a project like that today:
 ## Commands
 
 ```bash
-cosnex chat                          # interactive chat with the coding agent
-cosnex init ./my-app --name my-app    # scaffold a new orchestration project
-cosnex plan ./my-app                  # generate stage task packets + refresh the KG
-cosnex run ./my-app --execute          # run the multi-stage build pipeline
-cosnex context show ./my-app          # inspect shared project context
+quasnex chat                          # interactive chat with the coding agent
+quasnex init ./my-app --name my-app    # scaffold a new orchestration project
+quasnex plan ./my-app                  # generate stage task packets + refresh the KG
+quasnex run ./my-app --execute          # run the multi-stage build pipeline
+quasnex context show ./my-app          # inspect shared project context
 ```
 
 ## Inside the chat REPL
@@ -222,6 +360,9 @@ cosnex context show ./my-app          # inspect shared project context
 /providers                      list all configured providers and models
 /tools                          list tools available to the agent
 /skills                         list available skills
+/skill <name> <task>             apply a built-in or external skill
+/mcp                            list configured MCP servers
+/mcp tools <server>              discover a server's tools and input schemas
 /plan <task>                    run analyze -> implement -> verify
 /build <task>                   work through <task> following the Build skill
 /test [task]                    run/write tests following the Test skill
