@@ -1,9 +1,9 @@
 #!/bin/bash
-# Run test suite for AI Orchestrator
+# Run test suite for Quasnex
 
 set -e
 
-echo "Running AI Orchestrator Test Suite"
+echo "Running Quasnex Test Suite"
 echo "=================================="
 echo ""
 

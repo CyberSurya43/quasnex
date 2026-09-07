@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cosnex"
+name = "quasnex"
 version = "0.2.0"
-description = "Cosnex: a LangGraph-powered CLI coding agent for planning, building, testing, and shipping apps."
+description = "Quasnex — Multi-Model AI Coding Orchestrator"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -22,10 +22,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+mcp = ["mcp>=1.28,<2"]
 
 [project.scripts]
+quasnex = "ai_orchestrator.cli:main"
+# Backward-compatible executable names for existing installations and scripts.
 cosnex = "ai_orchestrator.cli:main"
-# Backward-compatible executable name for existing installations and scripts.
 forgeflow = "ai_orchestrator.cli:main"
 ai-orchestrator = "ai_orchestrator.cli:main"
 

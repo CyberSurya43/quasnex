@@ -1,6 +1,6 @@
 # Example Projects
 
-This folder contains example orchestration projects demonstrating how to use the AI Orchestrator framework.
+This folder contains example orchestration projects demonstrating how to use the Quasnex framework.
 
 ## Available Examples
 

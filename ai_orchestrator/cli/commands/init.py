@@ -15,15 +15,15 @@ def handle_init(project_dir: Path, name: str | None, force: bool) -> None:
     """Handle the init command."""
     print_brand_header(subtitle="Create a new engineering workspace")
     with console.status(
-        "[cosnex.subtle]Scaffolding workspace[/cosnex.subtle]",
+        "[quasnex.subtle]Scaffolding workspace[/quasnex.subtle]",
         spinner="arc",
-        spinner_style="cosnex.violet",
+        spinner_style="quasnex.violet",
     ):
         init_project(project_dir, name, force)
         graph = kg.build_or_update(project_dir.resolve() / "workspace", project_dir.resolve())
-    console.print("[cosnex.success]✓ Project ready[/cosnex.success] ", end="")
-    console.print(Text(str(project_dir.resolve()), style="cosnex.path"))
+    console.print("[quasnex.success]✓ Project ready[/quasnex.success] ", end="")
+    console.print(Text(str(project_dir.resolve()), style="quasnex.path"))
     console.print(
-        f"[cosnex.muted]Indexed {len(graph['files'])} files and "
-        f"{len(graph['edges'])} import edges.[/cosnex.muted]"
+        f"[quasnex.muted]Indexed {len(graph['files'])} files and "
+        f"{len(graph['edges'])} import edges.[/quasnex.muted]"
     )

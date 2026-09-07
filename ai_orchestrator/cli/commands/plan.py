@@ -15,10 +15,10 @@ def handle_plan(project_dir: Path) -> None:
     print_brand_header(subtitle="Turn the roadmap into executable stages")
     orchestrator = Orchestrator(project_dir)
     with console.status(
-        "[cosnex.subtle]Generating stage plans[/cosnex.subtle]",
+        "[quasnex.subtle]Generating stage plans[/quasnex.subtle]",
         spinner="arc",
-        spinner_style="cosnex.violet",
+        spinner_style="quasnex.violet",
     ):
         run_dir = orchestrator.plan()
-    console.print("[cosnex.success]✓ Plan generated[/cosnex.success] ", end="")
-    console.print(Text(str(run_dir), style="cosnex.path"))
+    console.print("[quasnex.success]✓ Plan generated[/quasnex.success] ", end="")
+    console.print(Text(str(run_dir), style="quasnex.path"))

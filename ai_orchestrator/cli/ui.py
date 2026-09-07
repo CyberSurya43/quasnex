@@ -1,4 +1,4 @@
-"""Shared Cosnex CLI branding and Rich presentation helpers."""
+"""Shared Quasnex CLI branding and Rich presentation helpers."""
 
 from __future__ import annotations
 
@@ -6,40 +6,41 @@ from contextlib import contextmanager
 from typing import Iterator
 
 from rich.console import Console
+from rich.live import Live
 from rich.rule import Rule
-from rich.status import Status
+from rich.spinner import Spinner
 from rich.text import Text
 from rich.theme import Theme
 
 
-APP_NAME = "Cosnex"
-BRAND_ICON = "◉─✦─◉"
-TAGLINE = "Navigate the code cosmos. Connect every nexus."
+APP_NAME = "Quasnex"
+BRAND_ICON = "[Q]"
+TAGLINE = "Multi-Model AI Coding Orchestrator"
 
-COSNEX_THEME = Theme(
+QUASNEX_THEME = Theme(
     {
-        "cosnex.brand": "bold #e2e8f0",
-        "cosnex.accent": "bold #22d3ee",
-        "cosnex.violet": "bold #a78bfa",
-        "cosnex.muted": "#64748b",
-        "cosnex.subtle": "#94a3b8",
-        "cosnex.border": "#334155",
-        "cosnex.success": "bold #34d399",
-        "cosnex.warning": "bold #fbbf24",
-        "cosnex.error": "bold #fb7185",
-        "cosnex.path": "#67e8f9 underline",
+        "quasnex.brand": "bold #e2e8f0",
+        "quasnex.accent": "bold #22d3ee",
+        "quasnex.violet": "bold #a78bfa",
+        "quasnex.muted": "#64748b",
+        "quasnex.subtle": "#94a3b8",
+        "quasnex.border": "#334155",
+        "quasnex.success": "bold #34d399",
+        "quasnex.warning": "bold #fbbf24",
+        "quasnex.error": "bold #fb7185",
+        "quasnex.path": "#67e8f9 underline",
     }
 )
 
-console = Console(theme=COSNEX_THEME, highlight=False)
+console = Console(theme=QUASNEX_THEME, highlight=False)
 
 
 def brand_lockup() -> Text:
-    """Return the compact Cosnex wordmark used throughout the CLI."""
+    """Return the compact Quasnex wordmark used throughout the CLI."""
     return Text.assemble(
-        (BRAND_ICON, "cosnex.accent"),
-        ("  COSNEX", "cosnex.brand"),
-        ("  /  AI engineering workspace", "cosnex.muted"),
+        (BRAND_ICON, "quasnex.accent"),
+        (f"  {APP_NAME}", "quasnex.brand"),
+        (f" — {TAGLINE}", "quasnex.muted"),
     )
 
 
@@ -54,23 +55,32 @@ def metadata_chip(label: str, value: str, *, accent: str = "#22d3ee") -> Text:
 def print_brand_header(*, subtitle: str | None = None) -> None:
     """Render a clean, low-noise branded header for one-shot commands."""
     console.print()
-    console.print(Rule(brand_lockup(), style="cosnex.border", align="left"))
-    console.print(Text(f"  {subtitle or TAGLINE}", style="cosnex.subtle"))
+    console.print(Rule(brand_lockup(), style="quasnex.border", align="left"))
+    console.print(Text(f"  {subtitle or TAGLINE}", style="quasnex.subtle"))
     console.print()
 
 
-@contextmanager
-def cosnex_indexing_animation() -> Iterator[Status]:
-    """Animate a small cosmos-to-nexus sequence while repository indexing runs."""
-    message = (
-        f"[cosnex.brand]{BRAND_ICON}[/cosnex.brand] "
-        "[cosnex.accent]Mapping the code cosmos[/cosnex.accent] "
-        "[cosnex.muted]• linking the nexus...[/cosnex.muted]"
+def quasnex_activity(message: str) -> Live:
+    """Pulse between connected nodes without implying measured task progress."""
+    spinner = Spinner(
+        "dots",
+        text=Text.assemble(
+            (f"{APP_NAME}  ", "quasnex.brand"),
+            (message, "quasnex.subtle"),
+        ),
+        style="quasnex.accent",
     )
-    with console.status(
-        message,
-        spinner="moon",
-        spinner_style="cosnex.accent",
-        refresh_per_second=12.0,
-    ) as status:
+    spinner.frames = [
+        "[Q] ●──○──○", "[Q] ○●─○──○", "[Q] ○─●○──○",
+        "[Q] ○──●──○", "[Q] ○──○●─○", "[Q] ○──○─●○",
+        "[Q] ○──○──●", "[Q] ○──○──○",
+    ]
+    spinner.interval = 140
+    return Live(spinner, console=console, refresh_per_second=10, transient=True)
+
+
+@contextmanager
+def quasnex_indexing_animation() -> Iterator[Live]:
+    """Show Quasnex activity while building repository context."""
+    with quasnex_activity("Indexing repository · building code context") as status:
         yield status

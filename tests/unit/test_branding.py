@@ -7,14 +7,12 @@ import unittest
 from ai_orchestrator.cli.ui import APP_NAME, BRAND_ICON, TAGLINE, brand_lockup, metadata_chip
 
 
-class CosnexBrandingTests(unittest.TestCase):
+class QuasnexBrandingTests(unittest.TestCase):
     def test_public_brand_name(self) -> None:
-        self.assertEqual(APP_NAME, "Cosnex")
-        self.assertEqual(BRAND_ICON, "◉─✦─◉")
-        self.assertIn("cosmos", TAGLINE.lower())
-        self.assertIn("nexus", TAGLINE.lower())
-        self.assertTrue(TAGLINE)
-        self.assertIn("COSNEX", brand_lockup().plain)
+        self.assertEqual(APP_NAME, "Quasnex")
+        self.assertEqual(BRAND_ICON, "[Q]")
+        self.assertEqual(TAGLINE, "Multi-Model AI Coding Orchestrator")
+        self.assertIn("Quasnex — Multi-Model AI Coding Orchestrator", brand_lockup().plain)
 
     def test_metadata_chip_contains_label_and_value(self) -> None:
         chip = metadata_chip("model", "openrouter/auto")
@@ -27,7 +25,8 @@ class CosnexBrandingTests(unittest.TestCase):
         config = tomllib.loads((project_root / "pyproject.toml").read_text(encoding="utf-8"))
         scripts = config["project"]["scripts"]
 
-        self.assertEqual(config["project"]["name"], "cosnex")
+        self.assertEqual(config["project"]["name"], "quasnex")
+        self.assertEqual(scripts["quasnex"], "ai_orchestrator.cli:main")
         self.assertEqual(scripts["cosnex"], "ai_orchestrator.cli:main")
         self.assertEqual(scripts["forgeflow"], "ai_orchestrator.cli:main")
         self.assertEqual(scripts["ai-orchestrator"], "ai_orchestrator.cli:main")

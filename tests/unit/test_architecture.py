@@ -23,7 +23,7 @@ def _write_env(project_dir: Path) -> None:
                 "OPENROUTER_API_KEY=test-openrouter-key",
                 "OPENROUTER_MODELS=openrouter/auto,anthropic/claude-sonnet-4.5",
                 "OPENROUTER_SITE_URL=https://example.test",
-                "OPENROUTER_APP_NAME=Cosnex Tests",
+                "OPENROUTER_APP_NAME=Quasnex Tests",
             ]
         ),
         encoding="utf-8",
@@ -69,7 +69,7 @@ class ModelRegistryTests(unittest.TestCase):
                 dict(provider.default_headers),
                 {
                     "HTTP-Referer": "https://example.test",
-                    "X-OpenRouter-Title": "Cosnex Tests",
+                    "X-OpenRouter-Title": "Quasnex Tests",
                 },
             )
 

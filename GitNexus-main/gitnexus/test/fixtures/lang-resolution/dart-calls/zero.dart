@@ -1,3 +1,0 @@
-String writeAuditSimple() {
-  return "zero";
-}
