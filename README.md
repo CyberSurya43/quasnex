@@ -31,23 +31,35 @@ progress states, and Markdown response cards that adapt to the terminal width.
   - `nvidia` — NVIDIA's NIM API (hosted open-source models)
   - `openrouter` — OpenRouter's hosted gateway and model catalog
 
-  Calls retry transient failures automatically; if the active provider errors out mid-chat,
-  the session falls back to another configured provider and keeps going.
+  Calls retry transient failures automatically; if the routed provider errors out mid-chat,
+  the session falls back to another configured candidate and keeps going.
 - **Agent loop** — [LangGraph](https://langchain-ai.github.io/langgraph/)'s `create_react_agent`
   runs a tool-using loop with SQLite-backed conversation state (`.orchestrator/chat_state.sqlite`),
   so context persists across chat sessions per project.
-- **Runtime model switching** — use `/model <provider> [model]` inside the chat REPL to switch
-  models mid-conversation without losing context.
-- **Capability-based model routing** — the orchestrator chooses a model for each task role.
-  The chat workflow uses `analyze -> implement -> verify` by default, while the internal role
-  catalog still supports planner, repository_search, documentation, coding/debugging, testing,
-  and deployment when a stage needs them. Defaults prefer NVIDIA reasoning/tool-use models for
-  planning, repository/documentation work, verification, and deployment, while Lightning
-  `qwen2.5-coder:14b` handles code generation and
-  debugging. Override role picks in `.env` with values like
+- **Planner-driven automatic routing** — every normal chat query first goes to the configured
+  planner model for a small, tool-free routing pass. It assesses the domain, complexity,
+  workload, and whether the request needs a direct answer or the full workflow, then chooses
+  an exact model from the allowed candidates for that capability. The choice is validated
+  locally; invalid output or a routing-call failure uses a safe deterministic fallback.
+- **Cross-provider delegation** — the thinking model and execution model do not need to use the
+  same provider. For example, an OpenRouter-hosted thinking model can delegate coding to an
+  NVIDIA-hosted model; Quasnex rebuilds the execution agent against the selected route.
+- **Capability-based model registry** — available routes are grouped into planner,
+  repository_search, documentation, coding, debugging, testing, and deployment roles. A
+  file-changing request keeps the `analyze -> execute -> verify` workflow, with the selected
+  model handling the main execution step. Defaults prefer NVIDIA reasoning/tool-use models for
+  planning, repository/documentation work, verification, and deployment, while a configured
+  code model handles code generation and debugging. Override preferred role candidates in
+  `.env` with values like
   `PLANNER_MODEL=openrouter:openrouter/auto` or `CODING_MODEL=lightning:qwen2.5-coder:14b`.
-  The chat UI shows only the planner/orchestrator model; internal routing still sees every
-  configured provider model for role fallback.
+  The selected route and routing rationale are shown before execution.
+- **Team-lead model boundary** — `/model` exposes only eligible thinking models: the configured
+  planner route, OSS-120B, and configured Nemotron models. Coding, debugging, testing,
+  repository-search, documentation, and deployment models stay internal; the selected thinking
+  model delegates work to them automatically. The choice persists across sessions, while
+  `/model auto` resets the controller to the configured `PLANNER_MODEL` route.
+- **Provider discovery** — `/providers` lists configured providers and model counts without
+  exposing the internal worker-model selection menu.
 - **Knowledge graph + context resolver** — the project is indexed into
   `.orchestrator/knowledge_graph.json` (files, functions/classes, import relationships),
   incrementally so re-indexing only re-parses changed files. Given a bug report or feature
@@ -101,21 +113,48 @@ OPENROUTER_MODELS=openrouter/auto
 ```
 
 List additional model slugs in `OPENROUTER_MODELS` as a comma-separated value.
-Every model used by `/model` or a capability override must be in that list:
+Every thinking or worker model used by a capability route must be in that list:
 
 ```dotenv
-OPENROUTER_MODELS=openrouter/auto,provider/model-slug
-PLANNER_MODEL=openrouter:openrouter/auto
+OPENROUTER_MODELS=nvidia/nemotron-3.5-lightning:free,nvidia/nemotron-3-ultra-550b-a55b:free
+PLANNER_MODEL=openrouter:nvidia/nemotron-3-ultra-550b-a55b:free
 ```
 
-Restart the chat after editing `.env`, then enter `/model` to choose from the
-numbered list.
+Restart the chat after editing `.env`. Quasnex automatically routes each request.
+`/model` lists only eligible thinking models; worker choices remain internal. A configured
+model whose slug contains `gpt-oss-120b` or `nemotron` is automatically included in this list.
+
+Each provider has its own comma-separated inventory. Add a model by adding its exact API slug;
+delete it by removing that slug:
+
+```dotenv
+LIGHTNING_MODELS=qwen2.5-coder:14b,qwen2.5-coder:7b
+NVIDIA_MODELS=openai/gpt-oss-120b,nvidia/nemotron-3-ultra-550b-a55b
+OPENROUTER_MODELS=nvidia/nemotron-3.5-lightning:free,nvidia/nemotron-3-ultra-550b-a55b:free
+```
+
+Providers can be enabled or disabled independently:
+
+```dotenv
+LIGHTNING_PROVIDER=false
+NVIDIA_PROVIDER=true
+OPENROUTER_PROVIDER=true
+```
+
+A disabled provider and all its models are removed from `/providers`, thinking-model selection,
+automatic delegation, and fallback routing. Role overrides pointing to a deliberately disabled
+provider are ignored, and `DEFAULT_PROVIDER` falls back to the first enabled provider.
+
+Run `/model reload` after saving `.env` to use the new inventory without restarting the app.
+Model slugs containing suffixes such as `:free` are preserved exactly. If the selected thinking
+model was removed, Quasnex safely returns to `PLANNER_MODEL`. Capability overrides such as
+`CODING_MODEL` must still reference a model present in that provider's `*_MODELS` list.
 
 The optional `OPENROUTER_SITE_URL` and `OPENROUTER_APP_NAME` settings enable
 OpenRouter app attribution. In an existing REPL session, run:
 
 ```text
-/model openrouter openrouter/auto
+/model openrouter nvidia/nemotron-3-ultra-550b-a55b:free
 ```
 
 `pip install -e .` registers the `quasnex` command (via the `[project.scripts]` entry
@@ -353,11 +392,12 @@ quasnex context show ./my-app          # inspect shared project context
 ## Inside the chat REPL
 
 ```
-/model                          choose from a numbered list loaded from *_MODELS in .env
-/model list                     list all configured providers and models
-/model nvidia openai/gpt-oss-20b  switch provider + model
-/model openrouter openrouter/auto   switch to OpenRouter's auto router
-/providers                      list all configured providers and models
+/model                          select from eligible thinking models
+/model auto                     reset to the configured thinking model
+/model reload                   reload provider models from .env
+/model list                     list eligible thinking models
+/model openrouter openrouter/auto   select it only when it is PLANNER_MODEL
+/providers                      list configured providers and model counts
 /tools                          list tools available to the agent
 /skills                         list available skills
 /skill <name> <task>             apply a built-in or external skill

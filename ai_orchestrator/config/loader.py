@@ -26,6 +26,7 @@ _DEFAULT_NVIDIA_MODELS = (
 )
 _DEFAULT_TEMPERATURE = 0.2
 _DEFAULT_MAX_RETRIES = 2
+_PROVIDER_NAMES = ("lightning", "nvidia", "openrouter")
 _MODEL_ROLES = (
     "planner",
     "repository_search",
@@ -106,6 +107,20 @@ def _get_int(env_vars: dict[str, str], name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _get_bool(env_vars: dict[str, str], name: str, default: bool) -> bool:
+    raw = _get(env_vars, name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(
+        f"{name} must be true or false, got {raw!r}"
+    )
 
 
 def _parse_model_route(raw: str, role: str, providers: dict[str, ProviderConfig]) -> ModelRoute:
@@ -209,11 +224,18 @@ def _default_role_routes(providers: dict[str, ProviderConfig]) -> dict[str, tupl
         role_routes[role].extend(available(("nvidia", "openai/gpt-oss-120b")))
         role_routes[role].extend(available(("lightning", "qwen2.5-coder:14b")))
 
-    if providers:
-        first_provider_name = next(iter(providers))
-        fallback = ModelRoute(first_provider_name, providers[first_provider_name].models[0])
-        for role in _MODEL_ROLES:
-            role_routes.setdefault(role, []).append(fallback)
+    # Every model explicitly listed in *_MODELS remains eligible for automatic
+    # routing. Curated capability matches above stay first, while this complete
+    # inventory lets the planner recognize newly configured specialist models
+    # without requiring code changes. Role-specific *_MODEL overrides are moved
+    # to the front later by _load_role_routes.
+    all_configured = [
+        ModelRoute(provider_name, model_name)
+        for provider_name, provider in providers.items()
+        for model_name in provider.models
+    ]
+    for role in _MODEL_ROLES:
+        role_routes.setdefault(role, []).extend(all_configured)
 
     return {role: _dedupe_routes(routes) for role, routes in role_routes.items()}
 
@@ -221,11 +243,15 @@ def _default_role_routes(providers: dict[str, ProviderConfig]) -> dict[str, tupl
 def _load_role_routes(
     env_vars: dict[str, str],
     providers: dict[str, ProviderConfig],
+    disabled_providers: set[str],
 ) -> dict[str, tuple[ModelRoute, ...]]:
     role_routes = _default_role_routes(providers)
     for role in _MODEL_ROLES:
         override = _get(env_vars, f"{role.upper()}_MODEL")
         if override:
+            override_provider = override.partition(":")[0].strip()
+            if override_provider in disabled_providers:
+                continue
             route = _parse_model_route(override, role, providers)
             existing = [r for r in role_routes.get(role, ()) if r != route]
             role_routes[role] = (route, *existing)
@@ -237,6 +263,11 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
     env_vars = _read_env_file(project_dir)
 
     providers: dict[str, ProviderConfig] = {}
+    enabled = {
+        name: _get_bool(env_vars, f"{name.upper()}_PROVIDER", True)
+        for name in _PROVIDER_NAMES
+    }
+    disabled_providers = {name for name, is_enabled in enabled.items() if not is_enabled}
 
     # Global fallback, overridable per-provider (e.g. LIGHTNING_TEMPERATURE wins
     # over DEFAULT_TEMPERATURE for the lightning provider specifically).
@@ -245,7 +276,7 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
 
     lightning_key = _get(env_vars, "LIGHTNING_API_KEY")
     lightning_url = _get(env_vars, "LIGHTNING_BASE_URL")
-    if lightning_url and lightning_key:
+    if enabled["lightning"] and lightning_url and lightning_key:
         models = tuple(
             m.strip() for m in _get(env_vars, "LIGHTNING_MODELS", "").split(",") if m.strip()
         )
@@ -259,7 +290,7 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
         )
 
     nvidia_key = _get(env_vars, "NVIDIA_API_KEY")
-    if nvidia_key:
+    if enabled["nvidia"] and nvidia_key:
         models = tuple(
             m.strip() for m in _get(env_vars, "NVIDIA_MODELS", "").split(",") if m.strip()
         )
@@ -273,7 +304,7 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
         )
 
     openrouter_key = _get(env_vars, "OPENROUTER_API_KEY")
-    if openrouter_key:
+    if enabled["openrouter"] and openrouter_key:
         models = tuple(
             m.strip() for m in _get(env_vars, "OPENROUTER_MODELS", "").split(",") if m.strip()
         )
@@ -294,9 +325,18 @@ def load_env(project_dir: Path) -> EnvironmentConfig:
             default_headers=tuple(headers),
         )
 
-    default_provider = _get(env_vars, "DEFAULT_PROVIDER", next(iter(providers), "lightning"))
+    configured_default = _get(
+        env_vars,
+        "DEFAULT_PROVIDER",
+        next(iter(providers), "lightning"),
+    )
+    default_provider = (
+        configured_default
+        if configured_default in providers
+        else next(iter(providers), "lightning")
+    )
 
-    role_models = _load_role_routes(env_vars, providers)
+    role_models = _load_role_routes(env_vars, providers, disabled_providers)
 
     return EnvironmentConfig(
         default_provider=default_provider,
