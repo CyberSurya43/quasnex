@@ -18,8 +18,15 @@ from rich.text import Text
 from ai_orchestrator import knowledge_graph as kg
 from ai_orchestrator.agent_tools import set_confirmation_sink
 from ai_orchestrator.agent_tools.confirm import set_os_permission_sink
+from ai_orchestrator.config import ModelRoute
 from ai_orchestrator.core import CodingAgent, HardStopError, MIN_RECURSION_LIMIT
-from ai_orchestrator.llm import ModelRegistry, UnknownModelError, UnknownProviderError
+from ai_orchestrator.llm import (
+    ModelRegistry,
+    QueryRouter,
+    RoutingDecision,
+    UnknownModelError,
+    UnknownProviderError,
+)
 from ai_orchestrator.skills import list_skills, load_skill
 from ai_orchestrator.integrations import IntegrationError
 from ai_orchestrator.agent_tools import mcp_tools
@@ -42,9 +49,9 @@ _active_status = None
 
 
 @contextmanager
-def _thinking_status():
+def _thinking_status(message: str = "Thinking · working on your request"):
     global _active_status
-    status = quasnex_activity("Thinking · working on your request")
+    status = quasnex_activity(message)
     status.start()
     _active_status = status
     try:
@@ -92,9 +99,12 @@ _PLAN_WORKFLOW = (
 )
 
 _HELP_COMMANDS = (
-    ("Models", "/model", "Choose from models configured in .env"),
-    ("Models", "/model list", "List all configured models"),
-    ("Models", "/model <provider> [model]", "Switch directly"),
+    ("Models", "/model", "Select an eligible thinking model"),
+    ("Models", "/model auto", "Reset to the configured thinking model"),
+    ("Models", "/model reload", "Reload provider models from .env"),
+    ("Models", "/model list", "List eligible thinking models"),
+    ("Models", "/model <provider> [model]", "Select an allowed thinking model"),
+    ("Models", "/providers", "List configured providers"),
     ("Workspace", "/kg [rebuild]", "Inspect or rebuild the knowledge graph"),
     ("Workspace", "/tools", "List agent tools"),
     ("Workspace", "/skills", "List built-in and external skills"),
@@ -146,6 +156,7 @@ class ChatSession:
 
         self.registry = ModelRegistry(project_dir)
         self.registry.switch_role("planner")
+        self.router = QueryRouter(self.registry)
         self.agent = CodingAgent(
             self.registry,
             workspace_root=self.workspace_root,
@@ -168,7 +179,9 @@ class ChatSession:
             else "empty"
         )
         chips = Text.assemble(
-            metadata_chip("model", f"{planner.provider}/{planner.model}"),
+            metadata_chip("router", f"{planner.provider}/{planner.model}"),
+            "  ",
+            metadata_chip("mode", "automatic", accent="#34d399"),
             "  ",
             metadata_chip("index", index_summary, accent="#a78bfa"),
         )
@@ -205,12 +218,7 @@ class ChatSession:
                     break
                 continue
 
-            if self._should_run_workflow(user_input):
-                self._run_plan_workflow(user_input)
-            else:
-                # A model selected with /model remains active for ordinary chat.
-                # Capability workflows still select their configured role model.
-                self._send(user_input, preserve_active=True)
+            self._dispatch_query(user_input)
 
     # ------------------------------------------------------------------
 
@@ -221,6 +229,7 @@ class ChatSession:
         recursion_limit: int = _DEFAULT_RECURSION_LIMIT,
         *,
         preserve_active: bool = False,
+        model_route: ModelRoute | None = None,
     ) -> str | None:
         def on_tool_call(name: str, args: dict) -> None:
             preview = str(args)
@@ -235,7 +244,9 @@ class ChatSession:
             )
 
         try:
-            if not preserve_active:
+            if model_route is not None:
+                self.registry.switch(model_route.provider, model_route.model)
+            elif not preserve_active:
                 self.registry.switch_role(model_role)
             self.agent.rebuild()
             with _thinking_status():
@@ -339,15 +350,59 @@ class ChatSession:
         text = str(exc)
         return any(marker in text for marker in _NON_RETRYABLE_ERRORS)
 
-    def _run_plan_workflow(self, task: str) -> None:
+    def _dispatch_query(self, message: str) -> None:
+        """Always ask the thinking model to delegate a normal chat turn."""
+        with _thinking_status("Routing · analyzing task and selecting a model"):
+            decision = self.router.route(message)
+        self._print_routing_decision(decision)
+        if decision.execution_mode == "workflow":
+            self._run_plan_workflow(message, execution_decision=decision)
+        else:
+            self._send(message, model_role=decision.role, model_route=decision.route)
+
+    def _print_routing_decision(self, decision: RoutingDecision) -> None:
+        source = "planner" if decision.source == "planner" else "default route"
+        console.print(
+            Text.assemble(
+                (" ROUTE ", "bold #0b1120 on #22d3ee"),
+                (f" {decision.route.label} ", "quasnex.accent"),
+                (f"{decision.role} · {decision.domain} · ", "quasnex.muted"),
+                (decision.complexity, "quasnex.violet"),
+                (f" complexity · {decision.workload} workload · {source}", "quasnex.muted"),
+            )
+        )
+        console.print(Text(f"  {decision.reason}", style="quasnex.subtle"))
+
+    def _run_plan_workflow(
+        self,
+        task: str,
+        execution_decision: RoutingDecision | None = None,
+    ) -> None:
         original_task = task or "(continue the current work)"
         context = f"Original user task:\n{original_task}"
+        if execution_decision is not None:
+            context += (
+                "\n\nPlanner routing decision:\n"
+                f"role={execution_decision.role}; model={execution_decision.route.label}; "
+                f"domain={execution_decision.domain}; complexity={execution_decision.complexity}; "
+                f"workload={execution_decision.workload}; reason={execution_decision.reason}"
+            )
         for index, (label, role, instruction) in enumerate(_PLAN_WORKFLOW, start=1):
+            selected_route = (
+                execution_decision.route
+                if execution_decision is not None and label == "Implement"
+                else None
+            )
+            selected_role = (
+                execution_decision.role
+                if execution_decision is not None and label == "Implement"
+                else role
+            )
             console.print(
                 Rule(
                     f"[quasnex.accent]0{index}[/quasnex.accent]  "
                     f"[quasnex.brand]{label}[/quasnex.brand]  "
-                    f"[quasnex.muted]{role}[/quasnex.muted]",
+                    f"[quasnex.muted]{selected_role}[/quasnex.muted]",
                     style="quasnex.border",
                     align="left",
                 )
@@ -362,7 +417,12 @@ class ChatSession:
                 "Keep this step bounded. If you hit uncertainty, record the assumption and continue. "
                 "Never end by asking the user whether to continue."
             )
-            response = self._send(message, role, recursion_limit=_WORKFLOW_RECURSION_LIMIT)
+            response = self._send(
+                message,
+                selected_role,
+                recursion_limit=_WORKFLOW_RECURSION_LIMIT,
+                model_route=selected_route,
+            )
             if response is None:
                 console.print(f"[red]Workflow stopped during {label}.[/red]")
                 return
@@ -398,7 +458,7 @@ class ChatSession:
             return False
 
         if cmd == "/providers":
-            self._print_model_status()
+            self._print_provider_status()
             return False
 
         if cmd == "/skills":
@@ -466,30 +526,64 @@ class ChatSession:
 
         if cmd == "/model":
             if len(parts) == 1:
-                self._select_model_interactively()
+                self._select_thinking_model_interactively()
+                return False
+            if parts[1].lower() == "auto":
+                self.registry.reset_thinking_model()
+                self.agent.rebuild()
+                console.print(
+                    metadata_chip("routing", "automatic · planner decides", accent="#34d399")
+                )
+                return False
+            if parts[1].lower() == "reload":
+                try:
+                    available = self.registry.reload_env()
+                    self.registry.switch_role("planner")
+                    self.agent.rebuild()
+                except (RuntimeError, ValueError) as exc:
+                    console.print(f"[red]Unable to reload .env:[/red] {exc}")
+                    return False
+                model_count = sum(len(models) for models in available.values())
+                console.print(
+                    metadata_chip(
+                        "models reloaded",
+                        f"{len(available)} providers · {model_count} models",
+                        accent="#34d399",
+                    )
+                )
+                self._print_model_status()
                 return False
             if parts[1].lower() == "list":
                 self._print_model_status()
                 return False
             provider_name = parts[1]
             model_name = parts[2] if len(parts) > 2 else None
+            visible = self.registry.list_visible_models()
+            allowed_models = visible.get(provider_name, ())
+            if model_name is None and allowed_models:
+                model_name = allowed_models[0]
+            if model_name not in allowed_models:
+                console.print(
+                    "[red]Error:[/red] Only models shown by [bold]/model list[/bold] can be "
+                    "selected as thinking models. Worker models are delegated automatically."
+                )
+                return False
             try:
-                provider, model = self.registry.switch(provider_name, model_name)
+                provider, model = self.registry.switch_thinking_model(provider_name, model_name)
             except (UnknownProviderError, UnknownModelError) as exc:
                 console.print(f"[red]Error:[/red] {exc}")
                 return False
             self.agent.rebuild()
-            console.print(metadata_chip("active", f"{provider}/{model}", accent="#34d399"))
+            console.print(metadata_chip("thinking model", f"{provider}/{model}", accent="#34d399"))
             return False
 
         console.print(f"[red]Unknown command:[/red] {cmd}. Type /help for a list.")
         return False
 
     def _print_model_status(self) -> None:
-        current = self.registry.current()
         route = self.registry.planner_model()
         table = Table(
-            title="MODEL REGISTRY",
+            title="THINKING MODELS",
             title_style="quasnex.brand",
             box=box.SIMPLE_HEAVY,
             border_style="quasnex.border",
@@ -503,20 +597,92 @@ class ChatSession:
         table.add_column("Model", overflow="fold")
         table.add_column("Status", justify="center")
         index = 1
-        for provider_name, models in self.registry.list_available().items():
+        for provider_name, models in self.registry.list_visible_models().items():
             for model_name in models:
                 status = (
-                    "[quasnex.success]● active[/quasnex.success]"
-                    if (provider_name, model_name) == current
-                    else "[quasnex.muted]available[/quasnex.muted]"
+                    "[quasnex.success]● active TL[/quasnex.success]"
+                    if (provider_name, model_name) == (route.provider, route.model)
+                    else "[quasnex.muted]eligible[/quasnex.muted]"
                 )
-                table.add_row(str(index), Text(provider_name), Text(model_name), status)
+                table.add_row(
+                    str(index),
+                    Text(provider_name),
+                    Text(model_name),
+                    status,
+                )
                 index += 1
         console.print(table)
         console.print(
             f"[quasnex.muted]Planner route:[/quasnex.muted] {route.provider} / {route.model}  "
-            "[quasnex.muted]•[/quasnex.muted]  Choose with [bold]/model[/bold]"
+            "[quasnex.muted]•[/quasnex.muted]  "
+            "Worker routing: [bold]automatic[/bold]"
         )
+
+    def _print_provider_status(self) -> None:
+        thinking_provider = self.registry.planner_model().provider
+        thinking_by_provider = self.registry.list_visible_models()
+        table = Table(
+            title="AVAILABLE PROVIDERS",
+            title_style="quasnex.brand",
+            box=box.SIMPLE_HEAVY,
+            border_style="quasnex.border",
+            header_style="quasnex.muted",
+            pad_edge=False,
+        )
+        table.add_column("Provider", style="bold")
+        table.add_column("Models", justify="right")
+        table.add_column("Thinking", justify="right")
+        table.add_column("Status", justify="center")
+        for provider_name, models in self.registry.list_available().items():
+            status = (
+                "[quasnex.success]● router[/quasnex.success]"
+                if provider_name == thinking_provider
+                else "[quasnex.muted]available[/quasnex.muted]"
+            )
+            table.add_row(
+                provider_name,
+                str(len(models)),
+                str(len(thinking_by_provider.get(provider_name, ()))),
+                status,
+            )
+        console.print(table)
+
+    def _select_thinking_model_interactively(self) -> None:
+        choices = [
+            (provider_name, model_name)
+            for provider_name, models in self.registry.list_visible_models().items()
+            for model_name in models
+        ]
+        self._print_model_status()
+        if not choices:
+            console.print("[red]No thinking models are configured.[/red]")
+            return
+
+        try:
+            raw_choice = console.input(
+                f"Select thinking model [bold](1-{len(choices)})[/bold] "
+                "([dim]Enter to keep current[/dim]): "
+            ).strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Thinking model unchanged.[/dim]")
+            return
+        if not raw_choice:
+            console.print("[dim]Thinking model unchanged.[/dim]")
+            return
+        try:
+            choice_index = int(raw_choice) - 1
+        except ValueError:
+            choice_index = -1
+        if choice_index not in range(len(choices)):
+            console.print(
+                f"[red]Invalid selection.[/red] Enter a number from 1 to {len(choices)}."
+            )
+            return
+
+        provider, model = choices[choice_index]
+        self.registry.switch_thinking_model(provider, model)
+        self.agent.rebuild()
+        console.print(metadata_chip("thinking model", f"{provider}/{model}", accent="#34d399"))
 
     def _print_help(self) -> None:
         table = Table(
@@ -541,43 +707,6 @@ class ChatSession:
         console.print(Rule(f"[quasnex.brand]{title}[/quasnex.brand]", style="quasnex.border"))
         cards = [Text(f" {name} ", style="#cbd5e1 on #1e293b") for name in items]
         console.print(Columns(cards, padding=(0, 1), equal=False, expand=False))
-
-    def _select_model_interactively(self) -> None:
-        choices = [
-            (provider_name, model_name)
-            for provider_name, models in self.registry.list_available().items()
-            for model_name in models
-        ]
-        self._print_model_status()
-        if not choices:
-            console.print("[red]No models are configured.[/red]")
-            return
-
-        try:
-            raw_choice = console.input(
-                f"Select model [bold](1-{len(choices)})[/bold] "
-                "([dim]Enter to cancel[/dim]): "
-            ).strip()
-        except (KeyboardInterrupt, EOFError):
-            console.print("\n[dim]Model selection cancelled.[/dim]")
-            return
-        if not raw_choice:
-            console.print("[dim]Model selection cancelled.[/dim]")
-            return
-        try:
-            choice_index = int(raw_choice) - 1
-        except ValueError:
-            choice_index = -1
-        if choice_index not in range(len(choices)):
-            console.print(
-                f"[red]Invalid selection.[/red] Enter a number from 1 to {len(choices)}."
-            )
-            return
-
-        provider, model = choices[choice_index]
-        self.registry.switch(provider, model)
-        self.agent.rebuild()
-        console.print(metadata_chip("active", f"{provider}/{model}", accent="#34d399"))
 
 
 def handle_chat(project_dir: Path | None = None) -> None:

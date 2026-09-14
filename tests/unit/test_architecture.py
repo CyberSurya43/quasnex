@@ -19,7 +19,7 @@ def _write_env(project_dir: Path) -> None:
                 "LIGHTNING_API_KEY=test-lightning-key",
                 "LIGHTNING_MODELS=qwen2.5-coder:14b,qwen2.5-coder:7b",
                 "NVIDIA_API_KEY=test-nvidia-key",
-                "NVIDIA_MODELS=openai/gpt-oss-120b,qwen/qwen3-next-80b-a3b-instruct,qwen/qwen2.5-coder-32b-instruct,openai/gpt-oss-20b",
+                "NVIDIA_MODELS=openai/gpt-oss-120b,qwen/qwen3-next-80b-a3b-instruct,qwen/qwen2.5-coder-32b-instruct,openai/gpt-oss-20b,mistralai/mistral-nemotron,nvidia/nemotron-3-ultra-550b-a55b",
                 "OPENROUTER_API_KEY=test-openrouter-key",
                 "OPENROUTER_MODELS=openrouter/auto,anthropic/claude-sonnet-4.5",
                 "OPENROUTER_SITE_URL=https://example.test",
@@ -31,6 +31,38 @@ def _write_env(project_dir: Path) -> None:
 
 
 class ModelRegistryTests(unittest.TestCase):
+    def test_disabled_provider_and_its_models_are_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+            with (project_dir / ".env").open("a", encoding="utf-8") as env_file:
+                env_file.write(
+                    "\nLIGHTNING_PROVIDER=false"
+                    "\nCODING_MODEL=lightning:qwen2.5-coder:14b\n"
+                )
+
+            config = load_env(project_dir)
+
+            self.assertNotIn("lightning", config.providers)
+            self.assertEqual(config.default_provider, "nvidia")
+            self.assertTrue(
+                all(
+                    route.provider != "lightning"
+                    for routes in config.role_models.values()
+                    for route in routes
+                )
+            )
+
+    def test_invalid_provider_flag_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+            with (project_dir / ".env").open("a", encoding="utf-8") as env_file:
+                env_file.write("\nOPENROUTER_PROVIDER=maybe\n")
+
+            with self.assertRaisesRegex(ValueError, "OPENROUTER_PROVIDER must be true or false"):
+                load_env(project_dir)
+
     def test_defaults_to_configured_default_provider(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_dir = Path(tmp)
@@ -73,7 +105,7 @@ class ModelRegistryTests(unittest.TestCase):
                 },
             )
 
-    def test_visible_models_show_only_planner_model(self) -> None:
+    def test_visible_models_show_only_eligible_thinking_models(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_dir = Path(tmp)
             _write_env(project_dir)
@@ -81,7 +113,90 @@ class ModelRegistryTests(unittest.TestCase):
             registry = ModelRegistry(project_dir)
             visible = registry.list_visible_models()
 
-            self.assertEqual(visible, {"nvidia": ("openai/gpt-oss-120b",)})
+            self.assertEqual(
+                visible,
+                {
+                    "nvidia": (
+                        "openai/gpt-oss-120b",
+                        "mistralai/mistral-nemotron",
+                        "nvidia/nemotron-3-ultra-550b-a55b",
+                    )
+                },
+            )
+
+    def test_selected_thinking_model_persists_independently_from_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+
+            registry = ModelRegistry(project_dir)
+            registry.switch_thinking_model("nvidia", "nvidia/nemotron-3-ultra-550b-a55b")
+            registry.switch_role("coding")
+
+            self.assertEqual(
+                registry.planner_model().label,
+                "nvidia:nvidia/nemotron-3-ultra-550b-a55b",
+            )
+            reloaded = ModelRegistry(project_dir)
+            self.assertEqual(
+                reloaded.planner_model().label,
+                "nvidia:nvidia/nemotron-3-ultra-550b-a55b",
+            )
+
+    def test_worker_model_cannot_become_thinking_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+            registry = ModelRegistry(project_dir)
+
+            with self.assertRaises(UnknownModelError):
+                registry.switch_thinking_model("nvidia", "qwen/qwen2.5-coder-32b-instruct")
+
+    def test_env_reload_adds_and_removes_openrouter_free_models(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            env_path = project_dir / ".env"
+            first_model = "nvidia/nemotron-3.5-lightning:free"
+            second_model = "nvidia/nemotron-3-ultra-550b-a55b:free"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        "NVIDIA_API_KEY=test-nvidia-key",
+                        "NVIDIA_MODELS=openai/gpt-oss-120b",
+                        "OPENROUTER_API_KEY=test-openrouter-key",
+                        f"OPENROUTER_MODELS={first_model},{second_model}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            registry = ModelRegistry(project_dir)
+
+            self.assertEqual(
+                registry.list_internal_available()["openrouter"],
+                (first_model, second_model),
+            )
+            self.assertEqual(
+                registry.list_visible_models()["openrouter"],
+                (first_model, second_model),
+            )
+            registry.switch_thinking_model("openrouter", first_model)
+
+            env_path.write_text(
+                "\n".join(
+                    [
+                        "NVIDIA_API_KEY=test-nvidia-key",
+                        "NVIDIA_MODELS=openai/gpt-oss-120b",
+                        "OPENROUTER_API_KEY=test-openrouter-key",
+                        f"OPENROUTER_MODELS={second_model}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            registry.reload_env()
+
+            self.assertEqual(registry.list_internal_available()["openrouter"], (second_model,))
+            self.assertNotIn(first_model, registry.list_visible_models()["openrouter"])
+            self.assertEqual(registry.planner_model().label, "nvidia:openai/gpt-oss-120b")
 
     def test_role_defaults_route_by_capability(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +215,10 @@ class ModelRegistryTests(unittest.TestCase):
                 registry.model_for_role("debugging").label, "nvidia:qwen/qwen2.5-coder-32b-instruct"
             )
             self.assertEqual(registry.model_for_role("testing").label, "nvidia:openai/gpt-oss-120b")
+            self.assertIn(
+                "openrouter:anthropic/claude-sonnet-4.5",
+                [route.label for route in registry.role_candidates("coding")],
+            )
 
     def test_role_override_must_reference_configured_model(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -160,6 +279,19 @@ class ModelRegistryTests(unittest.TestCase):
             chat_model = registry.chat_model()
 
             self.assertEqual(chat_model.model_name, "openai/gpt-oss-20b")
+
+    def test_chat_model_for_route_does_not_change_active_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_dir = Path(tmp)
+            _write_env(project_dir)
+
+            registry = ModelRegistry(project_dir)
+            original = registry.current()
+            route = registry.model_for_role("coding")
+            chat_model = registry.chat_model_for_route(route, temperature=0.0)
+
+            self.assertEqual(chat_model.model_name, route.model)
+            self.assertEqual(registry.current(), original)
 
 
 if __name__ == "__main__":
