@@ -5,9 +5,32 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quasnex"
 version = "0.2.0"
-description = "Quasnex — Multi-Model AI Coding Orchestrator"
+description = "Multi-model AI coding agent and LLM orchestrator with automatic routing, repository context, and verification"
 readme = "README.md"
 requires-python = ">=3.11"
+authors = [
+    { name = "Surya K" },
+]
+keywords = [
+    "ai coding agent",
+    "ai coding orchestrator",
+    "llm orchestration",
+    "multi-model routing",
+    "langgraph",
+    "mcp",
+    "developer tools",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development",
+]
 dependencies = [
     "langchain>=1.0",
     "langchain-openai>=1.0",
@@ -30,6 +53,11 @@ quasnex = "ai_orchestrator.cli:main"
 cosnex = "ai_orchestrator.cli:main"
 forgeflow = "ai_orchestrator.cli:main"
 ai-orchestrator = "ai_orchestrator.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/CyberSurya43/ai_orchestrator"
+Repository = "https://github.com/CyberSurya43/ai_orchestrator.git"
+Issues = "https://github.com/CyberSurya43/ai_orchestrator/issues"
 
 [tool.setuptools.packages.find]
 include = ["ai_orchestrator*"]
