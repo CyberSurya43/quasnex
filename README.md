@@ -1,6 +1,11 @@
 # Quasnex: Multi-Model AI Coding Agent and LLM Orchestrator
 
-Quasnex is a Python CLI that routes software-development tasks to the right AI model, gives the selected model safe tools for working in your repository, and verifies code changes. Use hosted models through NVIDIA NIM or OpenRouter, connect a self-hosted OpenAI-compatible endpoint, or combine providers in one AI coding workflow.
+Quasnex is a multi-model AI agent and coding agent orchestrator for the
+terminal. This Python CLI routes software-development tasks to configured models,
+gives the selected model safe tools for working in your repository, and verifies code
+changes. Use hosted models through NVIDIA NIM or OpenRouter, connect a
+self-hosted OpenAI-compatible endpoint, or combine providers in one AI coding
+workflow.
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![LangGraph](https://img.shields.io/badge/Agent-LangGraph-1C3C3C)](https://www.langchain.com/langgraph)
