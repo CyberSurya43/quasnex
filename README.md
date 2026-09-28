@@ -1,4 +1,4 @@
-# Quasnex: Multi-Model AI Coding Agent and LLM Orchestrator
+# Quasnex — Multi-Model AI Coding Orchestrator
 
 Quasnex is a multi-model AI agent and coding agent orchestrator for the
 terminal. This Python CLI routes software-development tasks to configured models,
