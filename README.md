@@ -387,3 +387,20 @@ Quasnex uses planner-driven, capability-based model delegation. Its staged pipel
 - [Example project](examples/README.md)
 
 Search ranking cannot be guaranteed by README changes alone. A public repository, accurate GitHub description and topics, releases, inbound links, and—ideally—a dedicated crawlable documentation site all help search engines discover and understand Quasnex.
+
+## License
+
+Quasnex is licensed under the **PolyForm Noncommercial License 1.0.0**.
+
+### Permitted Uses
+- Personal projects and learning
+- Educational and academic research
+- Hobby projects and experimentation
+- Other uses permitted by the license
+
+### Commercial Use
+Commercial use of Quasnex requires a separate commercial license from the copyright holder.
+
+For commercial licensing inquiries, please contact the project maintainer.
+
+See [LICENSE](LICENSE) for the complete license terms.
